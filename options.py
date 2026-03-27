@@ -177,6 +177,17 @@ class MonodepthOptions:
                                  default=1.099,
                                  help="Max log-disparity shift for adaptive range head "
                                       "(default log(3)≈1.099 allows factor-of-3 shift)")
+        self.parser.add_argument("--num_learned_families",
+                                 type=int,
+                                 default=0,
+                                 help="Number of extra plane families with fully learnable "
+                                      "unit normals (0 = disabled).  Each family covers "
+                                      "--learned_planes_per_family depth levels and handles "
+                                      "surfaces at arbitrary orientations (oblique planes).")
+        self.parser.add_argument("--learned_planes_per_family",
+                                 type=int,
+                                 default=20,
+                                 help="Depth levels per learned plane family")
         self.parser.add_argument("--no_crop",
                                  action="store_true",
                                  help="if set, do not use resize crop data aug")

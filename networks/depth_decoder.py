@@ -223,13 +223,22 @@ class DepthDecoder(nn.Module):
                  use_cross_plane_attn=False,
                  cross_plane_attn_tau=1.0,
                  adaptive_plane_range=False,
-                 adaptive_range_margin=1.099):  # log(3) ≈ 1.099 → factor-of-3 max shift
+                 adaptive_range_margin=1.099,  # log(3) ≈ 1.099 → factor-of-3 max shift
+                 num_learned_families=0,
+                 learned_planes_per_family=20):
         super(DepthDecoder, self).__init__()
 
         self.no_levels = no_levels
         self.xz_levels = xz_levels
         self.yz_levels = yz_levels
-        self.all_levels = self.no_levels + self.xz_levels + self.yz_levels
+        self.num_learned_families   = num_learned_families
+        self.learned_planes_per_family = learned_planes_per_family
+        # fixed_levels: planes whose geometry is fully determined at build time
+        #               (XY fronto-parallel + XZ ground + YZ lateral)
+        # all_levels  : fixed_levels + learned families (logits/sigma span this)
+        # residualconv uses fixed_levels so the YZ slice [:, -yz_levels:] stays correct
+        self.fixed_levels = self.no_levels + self.xz_levels + self.yz_levels
+        self.all_levels   = self.fixed_levels + num_learned_families * learned_planes_per_family
         self.use_skips = use_skips
         self.upsample_mode = 'nearest'
         self.disp_min = disp_min
@@ -307,7 +316,7 @@ class DepthDecoder(nn.Module):
                 self.convs["residualconv"] = nn.Sequential(
                     nn.Conv2d(self.num_ch_dec[0], self.num_ch_dec[0], 3, padding=1),
                     nn.ReLU(inplace=True),
-                    nn.Conv2d(self.num_ch_dec[0], self.all_levels, 1),
+                    nn.Conv2d(self.num_ch_dec[0], self.fixed_levels, 1),
                 )
             else:
                 # Global residual: collapse spatial dims — one shift shared by all pixels
@@ -315,7 +324,7 @@ class DepthDecoder(nn.Module):
                 self.convs["residualconv"] = nn.Sequential(
                     nn.Conv2d(self.num_ch_dec[0], self.num_ch_dec[0], 1),
                     nn.AdaptiveAvgPool2d((1, 1)),
-                    nn.Conv2d(self.num_ch_dec[0], self.all_levels, 1),
+                    nn.Conv2d(self.num_ch_dec[0], self.fixed_levels, 1),
                 )
 
 
@@ -366,6 +375,42 @@ class DepthDecoder(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.Linear(64, 2),  # → (Δ log d_far, Δ log d_near)
             )
+
+        # Learned oblique plane families.
+        #
+        # Beyond the three fixed orthogonal families (XY/XZ/YZ) the scene may
+        # contain surfaces at arbitrary orientations — slanted roads, car hoods,
+        # building facades.  We add M extra families, each with K depth levels,
+        # whose unit normal n̂_m ∈ S² is a fully learned parameter.
+        #
+        # Depth at pixel (u, v) for family m, level k:
+        #
+        #   Z_{m,k}(u,v) = depth_k / ( n̂_m · K⁻¹[u,v,1]ᵀ )
+        #                 = depth_k / ( n̂_m[0]·(u−cx)/fx + n̂_m[1]·(v−cy)/fy + n̂_m[2] )
+        #
+        # and the corresponding disparity stored in disp_layered:
+        #
+        #   disp_{m,k}(u,v) = 0.1·0.58·W / Z_{m,k}(u,v)
+        #                    = disp_xy_k  ×  ( n̂_m · r(u,v) )
+        #
+        # where disp_xy_k = 0.1·0.58·W / depth_k is the XY-family disparity
+        # for the same depth level — so the learned family's disparity is just
+        # a pixel-dependent *scaling* of the XY levels by the dot product.
+        #
+        # Diversity initialisation: normals spread uniformly at 45° elevation
+        # around the forward axis so each family starts covering a different
+        # oblique direction.  Normals are re-normalised to S² each forward pass
+        # so the parameter space is unconstrained (no angle parametrisation).
+        if num_learned_families > 0:
+            print("use {} learned plane families ({} planes each)".format(
+                num_learned_families, learned_planes_per_family))
+            azimuths = torch.linspace(0.0, 2.0 * np.pi, num_learned_families + 1)[:num_learned_families]
+            elev     = np.pi / 4.0                      # 45° from z-axis (forward)
+            nx = np.sin(elev) * torch.cos(azimuths)     # num_learned_families
+            ny = np.sin(elev) * torch.sin(azimuths)
+            nz = np.cos(elev) * torch.ones(num_learned_families)
+            init_normals = torch.stack([nx, ny, nz], dim=1)  # M, 3
+            self.learned_normals = nn.Parameter(init_normals)
 
 
     def forward(self, input_features, input_grids=None):
@@ -539,6 +584,70 @@ class DepthDecoder(nn.Module):
             yz_norm_l = -yz_norm[:, None, :].expand(-1, self.yz_levels // 2, -1)
             norm = torch.cat([norm, yz_norm_r, yz_norm_l], dim=1)
             distance = torch.cat([distance, yz_distance], dim=1)
+
+        # --- Learned oblique plane families ----------------------------------
+        if self.num_learned_families > 0:
+            M = self.num_learned_families
+            K = self.learned_planes_per_family
+
+            # Unit normals: normalise each forward pass so params are unconstrained
+            n_hat = F.normalize(self.learned_normals, dim=-1)  # M, 3
+
+            # Pixel ray directions K⁻¹[u,v,1] in camera space using KITTI intrinsics
+            # (u−cx)/fx = x_norm / (2·fx_norm),  fx_norm = 0.58
+            # (v−cy)/fy = y_norm / (2·fy_norm),  fy_norm = 1.92
+            x_norm = input_grids[:, 0]                     # B, H, W
+            y_norm = input_grids[:, 1]                     # B, H, W
+            rx = x_norm / (2.0 * 0.58)                    # B, H, W  ← (u−cx)/fx
+            ry = y_norm / (2.0 * 1.92)                    # B, H, W  ← (v−cy)/fy
+            # rz = 1 implicitly
+
+            # n̂_m · r(u,v)  for all M families simultaneously
+            # Shape: (B, M, H, W)
+            n_dot_r = (n_hat[:, 0][None, :, None, None] * rx[:, None, :, :]
+                     + n_hat[:, 1][None, :, None, None] * ry[:, None, :, :]
+                     + n_hat[:, 2][None, :, None, None])           # B, M, H, W
+
+            # Pixels where the plane faces the camera (n̂·r > 0) are valid
+            valid_learned = n_dot_r > 1e-6                         # B, M, H, W
+            n_dot_r = n_dot_r.clamp(min=1e-6)
+
+            # Log-spaced XY-equivalent disparities for K depth levels (same range as XY)
+            k_idx    = torch.arange(K, dtype=torch.float32, device=x.device)
+            xy_disp_k = (self.disp_max
+                         * (self.disp_min / self.disp_max) ** (k_idx / max(K - 1, 1)))  # K
+
+            # disp_{m,k}(u,v) = xy_disp_k[k] × (n̂_m · r(u,v))
+            # Broadcast: (1,1,K,1,1) × (B,M,1,H,W) → (B,M,K,H,W) → (B,M*K,H,W)
+            disp_learned = (xy_disp_k[None, None, :, None, None]
+                            * n_dot_r[:, :, None, :, :])           # B, M, K, H, W
+            disp_learned = disp_learned.reshape(B, M * K, H, W)
+
+            # Padding mask: valid per family, repeated for K levels
+            pad_learned = (valid_learned[:, :, None, :, :]
+                           .float()
+                           .expand(-1, -1, K, -1, -1)
+                           .reshape(B, M * K, H, W))
+
+            # Plane normals for HomographyWarp: n̂_m repeated K times per family
+            norm_learned = (n_hat[None, :, None, :]
+                            .expand(B, -1, K, -1)
+                            .reshape(B, M * K, 3))                 # B, M*K, 3
+
+            # Representative plane distance for HomographyWarp: depth_k (in metres)
+            # depth_k = 0.1·0.58·W / xy_disp_k, tiled for M families
+            depth_k = 0.1 * 0.58 * W / xy_disp_k                  # K
+            dist_learned = (depth_k.repeat(M)                      # M*K
+                            .unsqueeze(0).expand(B, -1))           # B, M*K
+
+            disp_layered = torch.cat([disp_layered, disp_learned], dim=1)
+            padding_mask = torch.cat([padding_mask, pad_learned],  dim=1)
+            norm         = torch.cat([norm,         norm_learned], dim=1)
+            distance     = torch.cat([distance,     dist_learned], dim=1)
+
+            # Expose for monitoring / diversity regularisation in trainer
+            self.outputs["learned_normals"] = n_hat                # M, 3
+        # ---------------------------------------------------------------------
 
         self.outputs["distance"] = distance
         self.outputs["norm"] = norm

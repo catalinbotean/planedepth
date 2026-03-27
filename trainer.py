@@ -206,7 +206,9 @@ class Trainer:
                                                          use_cross_plane_attn=self.opt.use_cross_plane_attn,
                                                          cross_plane_attn_tau=self.opt.cross_plane_attn_tau,
                                                          adaptive_plane_range=self.opt.adaptive_plane_range,
-                                                         adaptive_range_margin=self.opt.adaptive_range_margin)
+                                                         adaptive_range_margin=self.opt.adaptive_range_margin,
+                                                         num_learned_families=self.opt.num_learned_families,
+                                                         learned_planes_per_family=self.opt.learned_planes_per_family)
                 
         elif self.opt.net_type == "PladeNet":
             print("train PladeNet")
