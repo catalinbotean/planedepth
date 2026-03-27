@@ -211,6 +211,14 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--alpha_normal_smooth",
+                                 type=float,
+                                 default=0.0,
+                                 help="Weight for image-edge-weighted surface normal "
+                                      "smoothness loss. Scale-invariant complement to "
+                                      "--alpha_smooth: penalises changes in surface "
+                                      "orientation rather than disparity magnitude. "
+                                      "Typical range: 0.01–0.1.")
         self.parser.add_argument("--alpha_entropy",
                                  type=float,
                                  default=0.0,

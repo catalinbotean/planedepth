@@ -687,6 +687,78 @@ class Trainer:
             outputs["mask_novel"] = outputs["mask_novel"].detach()
         
 
+    def compute_surface_normal_loss(self, outputs, inputs):
+        """Image-edge-weighted surface normal smoothness loss.
+
+        Surface normals are derived from the predicted depth map via
+        central-difference finite differences in 3-D camera space.  Neighbouring
+        normals are encouraged to agree within visually homogeneous regions, while
+        edges in the colour image suppress the penalty — just like the standard
+        disparity smoothness, but operating on orientation rather than depth
+        magnitude.
+
+        Advantage over disparity smoothness
+        ------------------------------------
+        Disparity gradients are scale-dependent: the same metric curvature gives
+        a larger gradient at short range than at long range.  Normal differences
+        (1 − cos θ) are scale-invariant, so the loss is equally sensitive to
+        planar regions at all depths.
+
+        Math
+        ----
+        From depth D and inv_K, compute camera-space points
+            P(u,v) = D(u,v) · K⁻¹ · [u, v, 1]ᵀ
+
+        Central-difference tangents:
+            t_u = P(u+1,v) − P(u−1,v)
+            t_v = P(u,v+1) − P(u,v−1)
+
+        Normal:  N = normalize( t_u × t_v )   (B, 3, H-2, W-2)
+
+        Edge-aware cosine loss:
+            w_u = exp(−γ · |∇_u I|)
+            w_v = exp(−γ · |∇_v I|)
+            L = mean( w_u · (1 − N(u,v)·N(u+1,v))
+                    + w_v · (1 − N(u,v)·N(u,v+1)) )
+        """
+        depth = outputs["depth"]                # B, 1, H, W
+        B, _, H, W = depth.shape
+        inv_K = inputs["inv_K"]                 # B, 4, 4
+
+        # --- backproject depth to camera-space 3-D points --------------------
+        # reuse the existing BackprojectDepth layer (same H, W)
+        cam_pts = self.backproject_depth(depth, inv_K)   # B, 4, H*W
+        pts = cam_pts[:, :3, :].reshape(B, 3, H, W)      # B, 3, H, W  (X, Y, Z)
+
+        # --- central-difference tangents (interior pixels only) --------------
+        t_u = pts[:, :, 1:-1, 2:] - pts[:, :, 1:-1, :-2]   # B, 3, H-2, W-2
+        t_v = pts[:, :, 2:, 1:-1] - pts[:, :, :-2, 1:-1]   # B, 3, H-2, W-2
+
+        # --- cross product N = t_u × t_v -------------------------------------
+        nx = t_u[:, 1] * t_v[:, 2] - t_u[:, 2] * t_v[:, 1]
+        ny = t_u[:, 2] * t_v[:, 0] - t_u[:, 0] * t_v[:, 2]
+        nz = t_u[:, 0] * t_v[:, 1] - t_u[:, 1] * t_v[:, 0]
+        norm = (nx.pow(2) + ny.pow(2) + nz.pow(2) + 1e-8).sqrt()
+        normals = torch.stack([nx, ny, nz], dim=1) / norm.unsqueeze(1)  # B, 3, H-2, W-2
+
+        # --- image-edge-aware weights ----------------------------------------
+        img = inputs[("color", "l")][:, :, 1:-1, 1:-1]         # B, 3, H-2, W-2
+        grad_u = (img[:, :, :, 1:] - img[:, :, :, :-1]).abs().mean(1, keepdim=True)  # B,1,H-2,W-3
+        grad_v = (img[:, :, 1:, :] - img[:, :, :-1, :]).abs().mean(1, keepdim=True)  # B,1,H-3,W-2
+
+        w_u = torch.exp(-self.opt.gamma_smooth * grad_u)   # B, 1, H-2, W-3
+        w_v = torch.exp(-self.opt.gamma_smooth * grad_v)   # B, 1, H-3, W-2
+
+        # --- cosine dissimilarity between neighbouring normals ---------------
+        # dot product along neighbouring pairs, interior of normals grid
+        dot_u = (normals[:, :, :, :-1] * normals[:, :, :, 1:]).sum(1, keepdim=True)   # B,1,H-2,W-3
+        dot_v = (normals[:, :, :-1, :] * normals[:, :, 1:, :]).sum(1, keepdim=True)   # B,1,H-3,W-2
+
+        loss_u = (1.0 - dot_u) * w_u
+        loss_v = (1.0 - dot_v) * w_v
+
+        return loss_u.mean() + loss_v.mean()
+
     def compute_lr_consistency_loss(self, outputs):
         """Left-right disparity geometric consistency loss.
 
@@ -790,6 +862,8 @@ class Trainer:
             losses["loss/lr_consistency_loss"] = 0
         if self.opt.alpha_entropy > 0.:
             losses["loss/entropy"] = 0
+        if self.opt.alpha_normal_smooth > 0.:
+            losses["loss/normal_smooth_loss"] = 0
 
         if self.opt.match_aug:
             color_name = "color_aug"
@@ -865,6 +939,14 @@ class Trainer:
             lr_loss = self.compute_lr_consistency_loss(outputs)
             losses["loss/lr_consistency_loss"] = lr_loss
             losses["loss/total_loss"] += self.opt.alpha_lr_consistency * lr_loss
+
+        # Surface normal smoothness: image-edge-weighted cosine loss on normals
+        # derived from the depth map via finite differences in 3-D space.
+        # Scale-invariant complement to the disparity smoothness loss.
+        if self.opt.alpha_normal_smooth > 0.:
+            normal_loss = self.compute_surface_normal_loss(outputs, inputs)
+            losses["loss/normal_smooth_loss"] = normal_loss
+            losses["loss/total_loss"] += self.opt.alpha_normal_smooth * normal_loss
 
         # Mixture entropy regularization: penalise high-entropy (uniform) plane
         # distributions.  H(π) = -Σ_k π_k log π_k ≥ 0; minimising H forces the
