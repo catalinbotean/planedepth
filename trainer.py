@@ -896,7 +896,17 @@ class Trainer:
                 if self.opt.automask:
                     ph_loss_auto = torch.abs(inputs[(color_name, "l")] - target).mean(1, True)
                     ph_loss, _ = torch.cat([ph_loss, ph_loss_auto], dim=1).min(1, True)
-            ph_loss = ph_loss.mean()
+            # Focal photometric loss: upweight hard pixels (large reconstruction
+            # error), downweight easy pixels.  gamma=0 → standard L1/mixture.
+            # w_focal = (err / mean_err)^gamma, clamped to avoid extreme weights.
+            if self.opt.focal_ph_gamma > 0.:
+                with torch.no_grad():
+                    w_focal = (ph_loss.detach() /
+                               (ph_loss.detach().mean() + 1e-8)
+                               ).pow(self.opt.focal_ph_gamma).clamp(max=4.0)
+                ph_loss = (w_focal * ph_loss).mean()
+            else:
+                ph_loss = ph_loss.mean()
             losses["loss/ph_loss"] += ph_loss
             total_loss += ph_loss
 

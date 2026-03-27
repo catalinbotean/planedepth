@@ -211,6 +211,14 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--focal_ph_gamma",
+                                 type=float,
+                                 default=0.0,
+                                 help="Focal exponent for the photometric loss. gamma=0 "
+                                      "gives standard L1/mixture loss. gamma>0 upweights "
+                                      "hard pixels (large error) and downweights easy ones "
+                                      "via w = (err/mean_err)^gamma (clamped at 4). "
+                                      "Typical range: 0.5–2.0.")
         self.parser.add_argument("--use_multiscale_logits",
                                  action="store_true",
                                  help="If set, attach auxiliary plane-logit heads at decoder "
