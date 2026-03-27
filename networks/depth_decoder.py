@@ -219,6 +219,7 @@ class DepthDecoder(nn.Module):
                  use_mixture_loss=False,
                  render_probability=False,
                  plane_residual=False,
+                 pixelwise_plane_residual=False,
                  use_cross_plane_attn=False,
                  cross_plane_attn_tau=1.0,
                  adaptive_plane_range=False,
@@ -241,11 +242,13 @@ class DepthDecoder(nn.Module):
         self.pe_type = pe_type
         self.use_mixture_loss = use_mixture_loss
         self.render_probability = render_probability
-        self.plane_residual = plane_residual
+        # pixelwise_plane_residual implies plane_residual (it is a strictly better version)
+        self.pixelwise_plane_residual = pixelwise_plane_residual
+        self.plane_residual = plane_residual or pixelwise_plane_residual
 
         self.num_ch_enc = num_ch_enc
         self.num_ch_dec = np.array([16, 32, 64, 128, 256])
-        
+
         self.use_denseaspp = use_denseaspp
 
         print("use {} xy planes, {} xz planes and {} yz planes.".format(self.no_levels, self.xz_levels, self.yz_levels))
@@ -295,10 +298,25 @@ class DepthDecoder(nn.Module):
         
             
         if self.plane_residual:
-            print("use plane residual")
-            self.convs["residualconv"] = nn.Sequential(nn.Conv2d(self.num_ch_dec[0], self.num_ch_dec[0], 1),
-                                                       nn.AdaptiveAvgPool2d((1, 1)),
-                                                       nn.Conv2d(self.num_ch_dec[0], self.all_levels, 1))
+            if self.pixelwise_plane_residual:
+                # Per-pixel sub-level offset: each pixel gets an independent fractional
+                # shift to its effective plane index, bounded to ±0.5 via tanh.
+                # A 3×3 conv gives local spatial context before the 1×1 projection,
+                # helping smooth the shift field at depth discontinuities.
+                print("use pixelwise plane residual")
+                self.convs["residualconv"] = nn.Sequential(
+                    nn.Conv2d(self.num_ch_dec[0], self.num_ch_dec[0], 3, padding=1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(self.num_ch_dec[0], self.all_levels, 1),
+                )
+            else:
+                # Global residual: collapse spatial dims — one shift shared by all pixels
+                print("use plane residual")
+                self.convs["residualconv"] = nn.Sequential(
+                    nn.Conv2d(self.num_ch_dec[0], self.num_ch_dec[0], 1),
+                    nn.AdaptiveAvgPool2d((1, 1)),
+                    nn.Conv2d(self.num_ch_dec[0], self.all_levels, 1),
+                )
 
 
         # self.convs["angleconv"] = nn.Conv2d(self.num_ch_dec[0], 1, 3)
@@ -403,15 +421,28 @@ class DepthDecoder(nn.Module):
         disp_levels = torch.arange(self.no_levels).cuda()[None, :, None, None]
         disp_levels = disp_levels.expand(B, -1, -1, -1)
         if self.plane_residual:
-            residual_levels = self.sigmoid(self.convs["residualconv"](x)) - 0.5 #B, N, 1, 1
+            if self.pixelwise_plane_residual:
+                # tanh × 0.5  →  shift ∈ (−0.5, +0.5) plane levels, per pixel
+                # Output shape: (B, N, H, W)
+                residual_levels = torch.tanh(self.convs["residualconv"](x)) * 0.5
+            else:
+                # sigmoid − 0.5  →  same range (−0.5, +0.5), global (B, N, 1, 1)
+                residual_levels = self.sigmoid(self.convs["residualconv"](x)) - 0.5
             disp_levels = disp_levels + residual_levels[:, :self.no_levels, ...]
         # Log-spaced plane grid:  d_k = d_far · (d_near/d_far)^(k/(N-1))
-        # d_far_bc and d_near_bc are either per-image tensors (B,1,1,1)
-        # or plain scalars depending on adaptive_plane_range.
-        disp_layered = d_far_bc * (d_near_bc / d_far_bc) ** (disp_levels / (self.no_levels - 1))  # B, N, 1, 1
-        distance = 0.1 * 0.58 * W / disp_layered[:, :, 0, 0]
+        # When pixelwise_plane_residual is on, disp_levels is (B, N, H, W) and
+        # disp_layered comes out (B, N, H, W) directly.  Otherwise both are (B, N, 1, 1).
+        disp_layered = d_far_bc * (d_near_bc / d_far_bc) ** (disp_levels / (self.no_levels - 1))
+        # HomographyWarp needs a single representative distance per plane.
+        # For the global case the spatial dims are 1×1 so [:,:,0,0] is exact.
+        # For per-pixel we take the spatial mean — small approximation that
+        # keeps the homography-warp path working without changes downstream.
+        if self.pixelwise_plane_residual:
+            distance = 0.1 * 0.58 * W / disp_layered.mean(dim=(-2, -1))  # B, N
+        else:
+            distance = 0.1 * 0.58 * W / disp_layered[:, :, 0, 0]         # B, N
         norm = torch.tensor([0, 0, 1]).cuda()[None, None, :].expand(B, self.no_levels, -1)
-        disp_layered = disp_layered.expand(-1, -1, H, W)
+        disp_layered = disp_layered.expand(-1, -1, H, W)  # no-op when already H×W
         padding_mask = torch.ones_like(disp_layered)
         if self.xz_levels > 0:
             ground_levels = torch.arange(self.xz_levels).cuda()[None, :, None, None]

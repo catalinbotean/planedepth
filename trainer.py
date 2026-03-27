@@ -202,6 +202,7 @@ class Trainer:
                                                          use_mixture_loss=self.opt.use_mixture_loss,
                                                          render_probability=self.opt.render_probability,
                                                          plane_residual=self.opt.plane_residual,
+                                                         pixelwise_plane_residual=self.opt.pixelwise_plane_residual,
                                                          use_cross_plane_attn=self.opt.use_cross_plane_attn,
                                                          cross_plane_attn_tau=self.opt.cross_plane_attn_tau,
                                                          adaptive_plane_range=self.opt.adaptive_plane_range,

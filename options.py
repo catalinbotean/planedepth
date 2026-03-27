@@ -153,6 +153,11 @@ class MonodepthOptions:
         self.parser.add_argument("--plane_residual",
                                  action="store_true",
                                  help="If set, use residual plane based on init plane")
+        self.parser.add_argument("--pixelwise_plane_residual",
+                                 action="store_true",
+                                 help="If set, predict a per-pixel sub-level plane offset "
+                                      "instead of the global (spatially-pooled) residual. "
+                                      "Implies --plane_residual.")
         self.parser.add_argument("--use_cross_plane_attn",
                                  action="store_true",
                                  help="If set, apply cross-plane attention to enforce "
