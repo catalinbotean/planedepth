@@ -225,7 +225,8 @@ class DepthDecoder(nn.Module):
                  adaptive_plane_range=False,
                  adaptive_range_margin=1.099,  # log(3) ≈ 1.099 → factor-of-3 max shift
                  num_learned_families=0,
-                 learned_planes_per_family=20):
+                 learned_planes_per_family=20,
+                 use_multiscale_logits=False):
         super(DepthDecoder, self).__init__()
 
         self.no_levels = no_levels
@@ -254,6 +255,9 @@ class DepthDecoder(nn.Module):
         # pixelwise_plane_residual implies plane_residual (it is a strictly better version)
         self.pixelwise_plane_residual = pixelwise_plane_residual
         self.plane_residual = plane_residual or pixelwise_plane_residual
+        self.use_multiscale_logits = use_multiscale_logits
+        # Scales at which auxiliary logit heads are attached (1=H/2, 2=H/4, 3=H/8)
+        self._aux_scales = [1, 2, 3] if use_multiscale_logits else []
 
         self.num_ch_enc = num_ch_enc
         self.num_ch_dec = np.array([16, 32, 64, 128, 256])
@@ -300,6 +304,19 @@ class DepthDecoder(nn.Module):
         else:
             self.convs["dispconv"] = Conv3x3(self.num_ch_dec[0], self.all_levels)
         
+        # Auxiliary logit heads at coarser decoder scales.
+        # Each head projects that scale's feature map to plane logits; the
+        # outputs are bilinearly upsampled and added to the finest-scale logits
+        # as a residual.  This lets coarser context (global layout, sky/road
+        # separation) correct the fine-scale prediction without replacing it.
+        for s in self._aux_scales:
+            n_ch = self.num_ch_dec[s]
+            n_out = self.all_levels - 1 if render_probability else self.all_levels
+            self.convs[("dispconv_aux", s)] = Conv3x3(n_ch, n_out)
+            # Zero-initialise so the base model is fully recovered at the start
+            nn.init.zeros_(self.convs[("dispconv_aux", s)].conv.weight)
+            nn.init.zeros_(self.convs[("dispconv_aux", s)].conv.bias)
+
         if self.use_mixture_loss:
             print("use mixture Lap loss")
             self.convs["sigmaconv"] = Conv3x3(self.num_ch_dec[0], self.all_levels)
@@ -446,6 +463,7 @@ class DepthDecoder(nn.Module):
         if self.num_ep > 0:
             dgrid = F.interpolate(grids_ep, size=(x.shape[2], x.shape[3]), align_corners=True, mode='bilinear')
             x = torch.cat([x, dgrid], dim=1)
+        aux_logits = []  # [(logits_s, scale_i), ...] collected at auxiliary scales
         for i in range(4, -1, -1):
             x = self.convs[("upconv", i, 0)](x)
             x = [upsample(x)]
@@ -459,6 +477,10 @@ class DepthDecoder(nn.Module):
 
             if i == 4 and self.use_denseaspp:
                 x = self.convs["denseaspp"](x)
+
+            # Collect auxiliary logits at coarser scales before upsampling to full res
+            if self.use_multiscale_logits and i in self._aux_scales:
+                aux_logits.append(self.convs[("dispconv_aux", i)](x))
 
         # angle = (self.sigmoid(self.convs["angleconv"](x).mean(dim=-1).mean(dim=-1)) - 0.5) * 0.75 * np.pi
 
@@ -654,6 +676,9 @@ class DepthDecoder(nn.Module):
         self.outputs["disp_layered"] = disp_layered
         self.outputs["padding_mask"] = padding_mask
         logits = self.convs["dispconv"](x)
+        # Aggregate auxiliary logits from coarser scales (zero-init → identity at start)
+        for al in aux_logits:
+            logits = logits + F.interpolate(al, size=(H, W), mode='bilinear', align_corners=True)
         logits = logits * padding_mask
         if self.use_cross_plane_attn:
             logits = self.cross_plane_attn(logits, disp_layered, padding_mask)

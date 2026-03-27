@@ -208,7 +208,8 @@ class Trainer:
                                                          adaptive_plane_range=self.opt.adaptive_plane_range,
                                                          adaptive_range_margin=self.opt.adaptive_range_margin,
                                                          num_learned_families=self.opt.num_learned_families,
-                                                         learned_planes_per_family=self.opt.learned_planes_per_family)
+                                                         learned_planes_per_family=self.opt.learned_planes_per_family,
+                                                         use_multiscale_logits=self.opt.use_multiscale_logits)
                 
         elif self.opt.net_type == "PladeNet":
             print("train PladeNet")

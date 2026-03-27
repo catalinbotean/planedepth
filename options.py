@@ -211,6 +211,14 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--use_multiscale_logits",
+                                 action="store_true",
+                                 help="If set, attach auxiliary plane-logit heads at decoder "
+                                      "scales 1, 2, 3 (H/2, H/4, H/8) and add their upsampled "
+                                      "outputs as a residual to the finest-scale logits. "
+                                      "Zero-initialised so the base model is recovered at init. "
+                                      "Lets coarser context (sky/road layout) correct fine-scale "
+                                      "predictions without replacing them.")
         self.parser.add_argument("--use_confidence_smooth",
                                  action="store_true",
                                  help="If set, weight the disparity smoothness loss by the "
