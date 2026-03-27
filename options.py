@@ -153,6 +153,15 @@ class MonodepthOptions:
         self.parser.add_argument("--plane_residual",
                                  action="store_true",
                                  help="If set, use residual plane based on init plane")
+        self.parser.add_argument("--use_cross_plane_attn",
+                                 action="store_true",
+                                 help="If set, apply cross-plane attention to enforce "
+                                      "geometric consistency between XY/XZ/YZ families")
+        self.parser.add_argument("--cross_plane_attn_tau",
+                                 type=float,
+                                 default=1.0,
+                                 help="Temperature tau for the cross-plane geometric "
+                                      "compatibility kernel (lower = sharper gates)")
         self.parser.add_argument("--no_crop",
                                  action="store_true",
                                  help="if set, do not use resize crop data aug")

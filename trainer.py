@@ -190,18 +190,20 @@ class Trainer:
         if self.opt.net_type == "ResNet":
             print("train ResNet")
             self.models["encoder"] = networks.ResnetEncoder(self.opt.num_layers, True)
-            self.models["depth"] = networks.DepthDecoder(self.models["encoder"].num_ch_enc, 
-                                                         self.opt.disp_levels, 
-                                                         self.opt.disp_min, 
+            self.models["depth"] = networks.DepthDecoder(self.models["encoder"].num_ch_enc,
+                                                         self.opt.disp_levels,
+                                                         self.opt.disp_min,
                                                          self.opt.disp_max,
-                                                         self.opt.num_ep, 
+                                                         self.opt.num_ep,
                                                          pe_type=self.opt.pe_type,
-                                                         use_denseaspp=self.opt.use_denseaspp, 
-                                                         xz_levels=self.opt.xz_levels, 
+                                                         use_denseaspp=self.opt.use_denseaspp,
+                                                         xz_levels=self.opt.xz_levels,
                                                          yz_levels=self.opt.yz_levels,
-                                                         use_mixture_loss=self.opt.use_mixture_loss, 
-                                                         render_probability=self.opt.render_probability, 
-                                                         plane_residual=self.opt.plane_residual)
+                                                         use_mixture_loss=self.opt.use_mixture_loss,
+                                                         render_probability=self.opt.render_probability,
+                                                         plane_residual=self.opt.plane_residual,
+                                                         use_cross_plane_attn=self.opt.use_cross_plane_attn,
+                                                         cross_plane_attn_tau=self.opt.cross_plane_attn_tau)
                 
         elif self.opt.net_type == "PladeNet":
             print("train PladeNet")

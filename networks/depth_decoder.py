@@ -15,22 +15,212 @@ from .denseaspp import DenseAspp
 from collections import OrderedDict
 from layers import *
 
+
+class CrossPlaneAttention(nn.Module):
+    """Cross-attention between XY, XZ, and YZ plane families.
+
+    PlaneDepth's three families are geometrically coupled: at pixel (u, v),
+    XY plane k at depth Z_k uniquely determines the camera-space height Y and
+    lateral position X.  That height must equal the height of the dominant XZ
+    plane, and that X must match the dominant YZ plane.  The current decoder
+    ignores this coupling — each family votes independently.
+
+    This module enforces consistency by using the disparity of one family's
+    planes to *bias* the logits of another family, so geometrically compatible
+    plane pairs are jointly up-weighted.
+
+    Compatibility is computed in disparity space (simpler and more general than
+    physical space): two planes are compatible at a pixel if they predict the
+    same disparity there.
+
+        C[k, j, s] = exp( -( d_A[k, s] - d_B[j, s] )^2 / tau^2 )
+
+    where s is the relevant spatial coordinate (row for XY↔XZ, col for XY↔YZ).
+
+    Cross-attention refinement for family B (query) from family A (key):
+
+        attn[j, k, s] = softmax_k( logit_A[k, s] + log C[k, j, s] )
+        delta[j, s]   = sum_k  attn[j, k, s] * logit_A[k, s]
+        logit_B'[j]   = logit_B[j] + tanh(alpha) * delta[j]
+
+    All alpha scalars are zero-initialised so the module starts as identity
+    and the base model can fully recover during early training.
+    """
+
+    def __init__(self, n_xy, n_xz, n_yz, tau=1.0):
+        super(CrossPlaneAttention, self).__init__()
+        self.n_xy = n_xy
+        self.n_xz = n_xz
+        self.n_yz = n_yz
+        self.tau = tau
+
+        # One learnable scalar per attention direction, zero-init → identity at start
+        if n_xz > 0:
+            self.alpha_xy_to_xz = nn.Parameter(torch.zeros(1))
+            self.alpha_xz_to_xy = nn.Parameter(torch.zeros(1))
+        if n_yz > 0:
+            self.alpha_xy_to_yz = nn.Parameter(torch.zeros(1))
+            self.alpha_yz_to_xy = nn.Parameter(torch.zeros(1))
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers
+    # ------------------------------------------------------------------
+
+    def _compat(self, disp_a, disp_b):
+        """Disparity-space compatibility between two plane families.
+
+        Args:
+            disp_a: (B, N_a, S) — disparities for family A along spatial dim S
+            disp_b: (B, N_b, S) — disparities for family B along spatial dim S
+
+        Returns:
+            C: (B, N_a, N_b, S)  where C[b, a, b_idx, s] = exp(-Δd² / τ²)
+        """
+        # (B, N_a, 1, S) - (B, 1, N_b, S)  →  (B, N_a, N_b, S)
+        diff = disp_a[:, :, None, :] - disp_b[:, None, :, :]
+        return torch.exp(-diff.pow(2) / (self.tau ** 2))
+
+    # ------------------------------------------------------------------
+    # Core attention step
+    # ------------------------------------------------------------------
+
+    def _cross_attend(self, logits_q, logits_k, compat, alpha, spatial_dim):
+        """Refine query-family logits using key-family logits + geometric bias.
+
+        Args:
+            logits_q   : (B, N_q, H, W) — family being refined
+            logits_k   : (B, N_k, H, W) — family providing evidence
+            compat     : (B, N_k, N_q, S) — C[b, k, j, s]; S = H or W
+            alpha      : scalar nn.Parameter
+            spatial_dim: 'h' (XZ — varies with row) or 'w' (YZ — varies with col)
+
+        Returns refined logits_q of the same shape.
+        """
+        if spatial_dim == 'h':
+            # Collapse columns: key logits averaged over W  →  (B, N_k, H)
+            lk = logits_k.mean(-1)                             # B, N_k, H
+            # compat: (B, N_k, N_q, H) → permute → (B, N_q, N_k, H)
+            C = compat.permute(0, 2, 1, 3)                     # B, N_q, N_k, H
+            # Attention logit for query-plane j, key-plane k, row v:
+            #   lk[b,k,v]  +  log C[b,j,k,v]
+            attn = lk[:, None, :, :] + torch.log(C + 1e-8)    # B, N_q, N_k, H
+            attn = torch.softmax(attn, dim=2)                  # B, N_q, N_k, H
+            delta = (attn * lk[:, None, :, :]).sum(2)          # B, N_q, H
+            delta = delta.unsqueeze(-1).expand_as(logits_q)    # B, N_q, H, W
+        else:  # 'w'
+            # Collapse rows: key logits averaged over H  →  (B, N_k, W)
+            lk = logits_k.mean(-2)                             # B, N_k, W
+            C = compat.permute(0, 2, 1, 3)                     # B, N_q, N_k, W
+            attn = lk[:, None, :, :] + torch.log(C + 1e-8)    # B, N_q, N_k, W
+            attn = torch.softmax(attn, dim=2)                  # B, N_q, N_k, W
+            delta = (attn * lk[:, None, :, :]).sum(2)          # B, N_q, W
+            delta = delta.unsqueeze(-2).expand_as(logits_q)    # B, N_q, H, W
+
+        return logits_q + torch.tanh(alpha) * delta
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(self, logits, disp_layered, padding_mask):
+        """
+        Args:
+            logits       : (B, N_total, H, W) — raw logits from dispconv,
+                           already multiplied by padding_mask
+            disp_layered : (B, N_total, H, W) — disparity per plane per pixel
+            padding_mask : (B, N_total, H, W) — validity mask (0 = invalid pixel
+                           for that plane family, e.g. above-horizon for XZ)
+
+        Returns refined logits of the same shape, re-masked.
+        """
+        n_xy, n_xz, n_yz = self.n_xy, self.n_xz, self.n_yz
+
+        l_xy = logits[:, :n_xy]                                # B, N_xy, H, W
+        l_xz = logits[:, n_xy:n_xy + n_xz] if n_xz > 0 else None
+        l_yz = logits[:, n_xy + n_xz:]     if n_yz > 0 else None
+
+        # XY planes are fronto-parallel: their disparity is constant over (H, W).
+        # Take the value at position (0, 0) as representative.
+        disp_xy_scalar = disp_layered[:, :n_xy, 0, 0]         # B, N_xy
+
+        # --- XY ↔ XZ (ground planes vary only with image row) --------
+        if n_xz > 0:
+            # XZ disparity at each row (averaged over W for stability)
+            disp_xz_row = disp_layered[:, n_xy:n_xy + n_xz, :, 0]  # B, N_xz, H
+
+            # XY disparity broadcast to each row
+            disp_xy_row = disp_xy_scalar[:, :, None].expand(
+                -1, -1, disp_xz_row.shape[-1])                # B, N_xy, H
+
+            C_xy_xz = self._compat(disp_xy_row, disp_xz_row) # B, N_xy, N_xz, H
+
+            # Save original logits so both refinements use the un-updated values
+            l_xy_orig = l_xy
+            l_xz_orig = l_xz
+
+            # Refine XZ with XY evidence (XZ is the query, XY is the key)
+            l_xz = self._cross_attend(
+                l_xz_orig, l_xy_orig, C_xy_xz,
+                self.alpha_xy_to_xz, spatial_dim='h')
+
+            # Refine XY with XZ evidence (XY is the query, XZ is the key)
+            # Compatibility is the transpose: C_xz_xy[b, k, j, h] = C_xy_xz[b, j, k, h]
+            C_xz_xy = C_xy_xz.permute(0, 2, 1, 3)            # B, N_xz, N_xy, H
+            l_xy = self._cross_attend(
+                l_xy_orig, l_xz_orig, C_xz_xy,
+                self.alpha_xz_to_xy, spatial_dim='h')
+
+        # --- XY ↔ YZ (lateral planes vary only with image column) ----
+        if n_yz > 0:
+            # YZ disparity at each column (averaged over H for stability)
+            disp_yz_col = disp_layered[:, n_xy + n_xz:, :, :].mean(-2)  # B, N_yz, W
+
+            disp_xy_col = disp_xy_scalar[:, :, None].expand(
+                -1, -1, disp_yz_col.shape[-1])                # B, N_xy, W
+
+            C_xy_yz = self._compat(disp_xy_col, disp_yz_col) # B, N_xy, N_yz, W
+
+            l_xy_for_yz = l_xy  # use XY as updated by XZ step above
+            l_yz_orig   = l_yz
+
+            l_yz = self._cross_attend(
+                l_yz_orig, l_xy_for_yz, C_xy_yz,
+                self.alpha_xy_to_yz, spatial_dim='w')
+
+            C_yz_xy = C_xy_yz.permute(0, 2, 1, 3)            # B, N_yz, N_xy, W
+            l_xy = self._cross_attend(
+                l_xy_for_yz, l_yz_orig, C_yz_xy,
+                self.alpha_yz_to_xy, spatial_dim='w')
+
+        # Reassemble and re-apply padding mask
+        parts = [l_xy]
+        if n_xz > 0:
+            parts.append(l_xz)
+        if n_yz > 0:
+            parts.append(l_yz)
+
+        refined = torch.cat(parts, dim=1)
+        return refined * padding_mask
+
+
 class DepthDecoder(nn.Module):
-    def __init__(self, num_ch_enc, 
-                 no_levels=49, 
-                 disp_min=2, 
-                 disp_max=300, 
+    def __init__(self, num_ch_enc,
+                 no_levels=49,
+                 disp_min=2,
+                 disp_max=300,
                  num_ep=0,
                  pe_type="neural",
-                 use_skips=True, 
-                 use_denseaspp=True, 
-                 xz_levels=0, 
+                 use_skips=True,
+                 use_denseaspp=True,
+                 xz_levels=0,
                  xz_min=0.1852, xz_max=0.3704, #xz_min=0.2315, xz_max=0.3426,#debugxz_min=0.001, xz_max=0.3704,#debug
                  yz_levels=0,
                  yz_min=0.1, yz_max=10.,
-                 use_mixture_loss=False, 
+                 use_mixture_loss=False,
                  render_probability=False,
-                 plane_residual=False):
+                 plane_residual=False,
+                 use_cross_plane_attn=False,
+                 cross_plane_attn_tau=1.0):
         super(DepthDecoder, self).__init__()
 
         self.no_levels = no_levels
@@ -110,11 +300,22 @@ class DepthDecoder(nn.Module):
 
 
         # self.convs["angleconv"] = nn.Conv2d(self.num_ch_dec[0], 1, 3)
-        
 
         self.decoder = nn.ModuleList(list(self.convs.values()))
         self.sigmoid = nn.Sigmoid()
         self.softmax = nn.Softmax(1)
+
+        # Cross-plane attention: enforces geometric consistency between plane families.
+        # Only active when at least one auxiliary family (XZ or YZ) is enabled.
+        self.use_cross_plane_attn = use_cross_plane_attn and (xz_levels > 0 or yz_levels > 0)
+        if self.use_cross_plane_attn:
+            print("use CrossPlaneAttention (tau={})".format(cross_plane_attn_tau))
+            self.cross_plane_attn = CrossPlaneAttention(
+                n_xy=self.no_levels,
+                n_xz=self.xz_levels,
+                n_yz=self.yz_levels,
+                tau=cross_plane_attn_tau,
+            )
         
 
     def forward(self, input_features, input_grids=None):
@@ -257,6 +458,8 @@ class DepthDecoder(nn.Module):
         self.outputs["padding_mask"] = padding_mask
         logits = self.convs["dispconv"](x)
         logits = logits * padding_mask
+        if self.use_cross_plane_attn:
+            logits = self.cross_plane_attn(logits, disp_layered, padding_mask)
         self.outputs["logits"] = logits
         if self.render_probability:
             depth_layered = 0.1 * 0.58 * W / disp_layered
