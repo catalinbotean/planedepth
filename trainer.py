@@ -687,6 +687,66 @@ class Trainer:
             outputs["mask_novel"] = outputs["mask_novel"].detach()
         
 
+    def compute_lr_consistency_loss(self, outputs):
+        """Left-right disparity geometric consistency loss.
+
+        When flip_right=True the batch contains:
+          outputs["disp"][:B]  – left-camera disparity  (B, 1, H, W)
+          outputs["disp"][B:]  – right-camera disparity in the flipped coordinate
+                                  system, i.e. disp[B:].flip(-1) is in left-camera coords.
+
+        Consistency requirement at each left pixel u:
+            d_L(u) ≈ d_R( u + d_L(u) )
+
+        i.e. warp the right disparity map toward the left using d_L as the
+        shift, and compare with d_L.  Pixels that fall out of the image
+        boundary (occluded/truncated) are masked out automatically by
+        padding_mode="zeros".
+
+        Optional confidence weighting: if the mixture model variance is
+        available (outputs["disp_var"]), use it to downweight uncertain
+        regions of the *left* prediction (the query side).
+        """
+        B_full = outputs["disp"].shape[0]
+        B = B_full // 2
+        H, W = outputs["disp"].shape[2], outputs["disp"].shape[3]
+
+        d_L = outputs["disp"][:B]          # B, 1, H, W  (pixel-unit disparities)
+        d_R = outputs["disp"][B:].flip(-1) # B, 1, H, W  (back to left-camera coords)
+
+        # Build sampling grid: for each left pixel (u, v), sample d_R at (u + d_L, v).
+        # grid_sample expects normalised coordinates in [-1, 1].
+        ys = torch.linspace(-1.0, 1.0, H, device=d_L.device)
+        xs = torch.linspace(-1.0, 1.0, W, device=d_L.device)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")       # H, W
+        grid_x = grid_x[None, None].expand(B, 1, -1, -1)             # B, 1, H, W
+        grid_y = grid_y[None, None].expand(B, 1, -1, -1)             # B, 1, H, W
+
+        # Convert pixel-unit d_L to normalised shift: +2*d_L/(W-1)
+        d_L_norm = d_L * (2.0 / max(W - 1, 1))
+        sample_x = (grid_x + d_L_norm).clamp(-1.0, 1.0)             # B, 1, H, W
+        sample_grid = torch.stack([sample_x[:, 0], grid_y[:, 0]], dim=-1)  # B, H, W, 2
+
+        # Sample right disparity at shifted positions.
+        # padding_mode="zeros" → out-of-bounds pixels return 0, which we use as mask.
+        d_R_warped = F.grid_sample(
+            d_R, sample_grid, padding_mode="zeros", align_corners=True)  # B, 1, H, W
+
+        # Validity mask: only pixels where d_R had a valid sample
+        with torch.no_grad():
+            valid = (d_R_warped > 0).float()
+
+        lr_error = torch.abs(d_L - d_R_warped)
+
+        # Optional: confidence-weight by inverse mixture variance of the left prediction
+        if "disp_var" in outputs:
+            conf = 1.0 / (outputs["disp_var"][:B] + 1e-4)
+            conf = conf / (conf.mean() + 1e-8)
+            lr_error = lr_error * conf
+
+        lr_loss = (lr_error * valid).sum() / (valid.sum() + 1e-8)
+        return lr_loss
+
     def perceptual_loss(self, pred, target, source=None):
         pred_vgg = self.pc_net(pred)
         target_vgg = self.pc_net(target)
@@ -726,6 +786,8 @@ class Trainer:
         if self.opt.alpha_self > 0.:
             losses["loss/self_loss"] = 0
         losses["loss/total_loss"] = 0
+        if self.opt.alpha_lr_consistency > 0.:
+            losses["loss/lr_consistency_loss"] = 0
 
         if self.opt.match_aug:
             color_name = "color_aug"
@@ -792,9 +854,16 @@ class Trainer:
             
         smooth_loss = get_smooth_loss_disp(outputs["disp"][..., int(0.2 * W):], inputs[("color", "l")][..., int(0.2 * W):], gamma=self.opt.gamma_smooth)
         losses["loss/smooth_loss"] = smooth_loss
-        
+
         losses["loss/total_loss"] += self.opt.alpha_smooth * smooth_loss
-            
+
+        # Left-right geometric consistency loss (requires flip_right so both
+        # hemispheres are present in outputs["disp"])
+        if self.opt.alpha_lr_consistency > 0. and self.opt.flip_right:
+            lr_loss = self.compute_lr_consistency_loss(outputs)
+            losses["loss/lr_consistency_loss"] = lr_loss
+            losses["loss/total_loss"] += self.opt.alpha_lr_consistency * lr_loss
+
         return losses
 
     def compute_depth_losses(self, inputs, outputs):

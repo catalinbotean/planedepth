@@ -211,6 +211,13 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--alpha_lr_consistency",
+                                 type=float,
+                                 default=0.0,
+                                 help="Weight for the left-right geometric consistency loss. "
+                                      "Requires --flip_right. At each left pixel with disparity "
+                                      "d_L the right disparity map (warped by d_L) must agree: "
+                                      "d_L(u) ≈ d_R(u + d_L(u)).  Typical range: 0.01–0.1.")
 
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size",
