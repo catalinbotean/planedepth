@@ -20,6 +20,7 @@ import torch.distributed as dist
 from tensorboardX import SummaryWriter
 
 import json
+import torchvision
 
 from utils import *
 from kitti_utils import *
@@ -88,7 +89,36 @@ class Trainer:
             self.target_sides = self.opt.novel_frame_ids
 
         self.models.update(self.create_models())
-            
+
+        # --- Semantic plane gate -----------------------------------------
+        # A frozen pretrained segmenter extracts dense class probabilities;
+        # a small learnable SemanticPlaneGate maps them to per-family logit
+        # biases that steer the plane softmax toward semantically consistent
+        # depth families (sky→XY, road→XZ, wall→YZ).
+        self.semantic_backbone = None
+        if self.opt.use_semantic_gate and self.opt.net_type == "ResNet":
+            seg = torchvision.models.segmentation.deeplabv3_resnet50(
+                pretrained=True)
+            seg.eval()
+            for p in seg.parameters():
+                p.requires_grad_(False)
+            self.semantic_backbone = seg.to(self.device)
+
+            n_learned = (self.opt.num_learned_families *
+                         self.opt.learned_planes_per_family)
+            self.models["semantic_gate"] = networks.SemanticPlaneGate(
+                num_classes=self.opt.semantic_num_classes,
+                n_xy=self.opt.disp_levels,
+                n_xz=self.opt.xz_levels,
+                n_yz=self.opt.yz_levels,
+                n_learned=n_learned,
+            )
+            # ImageNet normalisation constants (NCHW broadcastable)
+            self.sem_mean = torch.tensor(
+                [0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
+            self.sem_std  = torch.tensor(
+                [0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
+
         if len(self.opt.novel_frame_ids) > 0 and not self.opt.use_colmap:
             self.models["pose_encoder"] = networks.ResnetPoseEncoder(18, True, 2)
             self.models["pose"] = networks.PoseDecoder(self.models["pose_encoder"].num_ch_enc, num_input_features=1, num_frames_to_predict_for=1, num_ep=8)
@@ -366,7 +396,9 @@ class Trainer:
         # maybe we need use the same name for different model in self.models
         if self.opt.net_type == "ResNet":
             features = self.models["encoder"](inputs[("color_aug", "l")])
-            outputs = self.models["depth"](features, inputs["grid"])
+            sem_bias = self._get_semantic_bias(inputs[("color_aug", "l")])
+            outputs = self.models["depth"](features, inputs["grid"],
+                                           sem_bias=sem_bias)
         elif self.opt.net_type == "PladeNet":
             outputs = self.models["plade"](inputs[("color_aug", "l")], inputs["grid"])
         elif self.opt.net_type == "FalNet":
@@ -527,7 +559,9 @@ class Trainer:
                 # maybe we need use the same name for different model in self.models
                 if self.opt.net_type == "ResNet":
                     features = self.models["encoder"](inputs[("color_aug", "l")])
-                    outputs = self.models["depth"](features, inputs["grid"])
+                    sem_bias = self._get_semantic_bias(inputs[("color_aug", "l")])
+                    outputs = self.models["depth"](features, inputs["grid"],
+                                                   sem_bias=sem_bias)
                 elif self.opt.net_type == "PladeNet":
                     outputs = self.models["plade"](inputs[("color_aug", "l")], inputs["grid"])
                 elif self.opt.net_type == "FalNet":
@@ -714,6 +748,20 @@ class Trainer:
             outputs["mask_novel"] = torch.cat([o_r, o_l.flip(-1)], dim=0)
             outputs["mask_novel"] = outputs["mask_novel"].detach()
         
+
+    def _get_semantic_bias(self, img):
+        """Run frozen segmenter + SemanticPlaneGate → plane logit biases.
+
+        img : (B, 3, H, W) in [0, 1] range (may be 2B when flip_right=True)
+        Returns (B, N_planes, H_s, W_s) bias tensor, or None when disabled.
+        """
+        if self.semantic_backbone is None:
+            return None
+        with torch.no_grad():
+            img_norm = (img - self.sem_mean) / self.sem_std
+            sem_logits = self.semantic_backbone(img_norm)["out"]  # B, C, H_s, W_s
+        gate = self.models["semantic_gate"]
+        return gate(sem_logits)   # B, N_planes, H_s, W_s  (upsampled in decoder)
 
     def compute_surface_normal_loss(self, outputs, inputs):
         """Image-edge-weighted surface normal smoothness loss.
@@ -1068,6 +1116,12 @@ class Trainer:
         writer = self.writers[mode]
         for l, v in losses.items():
             writer.add_scalar(l, v, self.step)
+        # Log how open the semantic gate is (tanh(gate_scale) ∈ (-1, 1))
+        if self.semantic_backbone is not None and "semantic_gate" in self.models:
+            gate = self.models["semantic_gate"]
+            m = gate.module if hasattr(gate, "module") else gate
+            gate_strength = torch.tanh(m.gate_scale).item()
+            writer.add_scalar("semantic/gate_strength", gate_strength, self.step)
                     
     def log_img(self, mode, inputs, outputs, val_idx):
         """Write an event to the tensorboard events file

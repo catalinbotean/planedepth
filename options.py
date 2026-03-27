@@ -211,6 +211,21 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--use_semantic_gate",
+                                 action="store_true",
+                                 help="If set, run a frozen pretrained DeepLabV3-ResNet50 "
+                                      "segmenter on each input image and use the per-pixel "
+                                      "class probabilities to bias plane-family logits via "
+                                      "the learnable SemanticPlaneGate module: sky→XY, "
+                                      "road/terrain→XZ, building/wall→YZ. Requires "
+                                      "torchvision with pretrained weights available.")
+        self.parser.add_argument("--semantic_num_classes",
+                                 type=int,
+                                 default=21,
+                                 help="Number of output classes from the semantic backbone "
+                                      "(21 for COCO/VOC DeepLabV3, 19 for Cityscapes). "
+                                      "When 19, SemanticPlaneGate is auto-initialised with "
+                                      "the hand-crafted Cityscapes prior.")
         self.parser.add_argument("--plane_anneal_start",
                                  type=int,
                                  default=49,

@@ -16,6 +16,136 @@ from collections import OrderedDict
 from layers import *
 
 
+class SemanticPlaneGate(nn.Module):
+    """Semantic prior for plane family selection.
+
+    A frozen pretrained segmenter provides dense per-pixel class probabilities.
+    This module learns a small affinity matrix W ∈ R^{C × F} that maps those
+    probabilities to a per-family bias added to the plane logits before softmax.
+
+    Geometric motivation
+    --------------------
+    Each plane family has a canonical semantic context in outdoor driving:
+        XY (fronto-parallel) ↔ sky, far objects, anything at fixed depth
+        XZ (ground planes)   ↔ road, sidewalk, terrain
+        YZ (lateral planes)  ↔ buildings, walls, fences
+
+    By adding a small per-pixel bias to each family's logits, semantically
+    consistent planes are up-weighted before the competition happens.
+
+    Design choices for training stability
+    --------------------------------------
+    1. The bias is multiplied by tanh(gate_scale) where gate_scale is
+       initialised to 0.  At init, tanh(0)=0 → zero bias → base model
+       fully recovered.  The gate opens gradually as training proceeds.
+    2. The affinity matrix W is optionally initialised with a hand-crafted
+       Cityscapes-19 prior so the model starts with a sensible bias even
+       before the first gradient update.
+    3. For non-Cityscapes segmenters the matrix is zero-initialised and
+       learns the mapping from scratch.
+
+    Args
+    ----
+    num_classes : number of semantic classes C from the segmenter output
+    n_xy        : number of XY-family planes
+    n_xz        : number of XZ-family planes  (0 = family absent)
+    n_yz        : number of YZ-family planes  (0 = family absent)
+    n_learned   : total number of learned-family plane channels (0 = absent)
+    init_prior  : (n_families, C) float Tensor — optional initialisation;
+                  if None, falls back to the Cityscapes-19 prior when
+                  num_classes == 19, else zeros.
+    """
+
+    # ---------- hand-crafted Cityscapes-19 prior ---------------------------
+    # Cityscapes classes (0-based):
+    #   0:road  1:sidewalk  2:building  3:wall  4:fence  5:pole
+    #   6:traffic_light  7:traffic_sign  8:vegetation  9:terrain
+    #   10:sky  11:person  12:rider  13:car  14:truck  15:bus
+    #   16:train  17:motorcycle  18:bicycle
+    # Row order: [XY, XZ, YZ, learned]  (learned row always zeros at init)
+    _CITYSCAPES_PRIOR = [
+        # XY: sky (10), far vegetation (8), vehicles at all depths (13-16)
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.0,
+         1.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0.3, 0.1, 0.1],
+        # XZ: road (0), sidewalk (1), terrain (9)
+        [1.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        # YZ: building (2), wall (3), fence (4), pole (5 partial)
+        [0.0, 0.0, 1.0, 1.0, 0.8, 0.3, 0.0, 0.0, 0.0, 0.0,
+         0.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        # learned: neutral (all zeros, let training decide)
+        [0.0] * 19,
+    ]
+
+    def __init__(self, num_classes, n_xy, n_xz, n_yz, n_learned=0,
+                 init_prior=None):
+        super().__init__()
+        self.n_xy      = n_xy
+        self.n_xz      = n_xz
+        self.n_yz      = n_yz
+        self.n_learned = n_learned
+
+        # Active families: always have XY; XZ/YZ optional; learned optional
+        self.n_families = (1
+                           + (1 if n_xz > 0 else 0)
+                           + (1 if n_yz > 0 else 0)
+                           + (1 if n_learned > 0 else 0))
+
+        # Learnable affinity: maps C-dim class vector → n_families scores
+        self.affinity = nn.Linear(num_classes, self.n_families, bias=False)
+
+        # Initialise weights
+        if init_prior is not None:
+            w = torch.as_tensor(init_prior, dtype=torch.float32)
+            assert w.shape == (self.n_families, num_classes), \
+                "init_prior shape must be ({}, {})".format(self.n_families, num_classes)
+            self.affinity.weight.data.copy_(w)
+        elif num_classes == 19:
+            # Auto-detect Cityscapes model and use the hand-crafted prior
+            rows = ([0] +
+                    ([1] if n_xz > 0 else []) +
+                    ([2] if n_yz > 0 else []) +
+                    ([3] if n_learned > 0 else []))
+            prior = torch.tensor([self._CITYSCAPES_PRIOR[r] for r in rows])
+            self.affinity.weight.data.copy_(prior)
+        else:
+            nn.init.zeros_(self.affinity.weight)
+
+        # Scalar gate: starts at 0 → tanh(0) = 0 → zero bias at init
+        # Opens gradually during training so the base model is preserved early
+        self.gate_scale = nn.Parameter(torch.zeros(1))
+
+    def forward(self, semantic_logits):
+        """
+        semantic_logits : (B, C, H_s, W_s) raw logits from frozen segmenter
+        Returns         : (B, N_total_planes, H_s, W_s) additive logit biases
+                          (caller responsible for upsampling to decoder H, W)
+        """
+        # Soft class probabilities: (B, C, H, W) → (B, H, W, C)
+        class_probs = F.softmax(semantic_logits, dim=1).permute(0, 2, 3, 1)
+
+        # Per-family affinity score: (B, H, W, n_families) → (B, n_families, H, W)
+        family_scores = self.affinity(class_probs).permute(0, 3, 1, 2)
+
+        # Scale by learned gate (tanh → bounded, zero at init)
+        family_scores = torch.tanh(self.gate_scale) * family_scores
+
+        # Broadcast each family score to all planes in that family
+        fam_idx = 0
+        parts = [family_scores[:, fam_idx:fam_idx + 1].expand(-1, self.n_xy, -1, -1)]
+        fam_idx += 1
+        if self.n_xz > 0:
+            parts.append(family_scores[:, fam_idx:fam_idx + 1].expand(-1, self.n_xz, -1, -1))
+            fam_idx += 1
+        if self.n_yz > 0:
+            parts.append(family_scores[:, fam_idx:fam_idx + 1].expand(-1, self.n_yz, -1, -1))
+            fam_idx += 1
+        if self.n_learned > 0:
+            parts.append(family_scores[:, fam_idx:fam_idx + 1].expand(-1, self.n_learned, -1, -1))
+
+        return torch.cat(parts, dim=1)  # B, N_total, H_s, W_s
+
+
 class CrossPlaneAttention(nn.Module):
     """Cross-attention between XY, XZ, and YZ plane families.
 
@@ -440,7 +570,12 @@ class DepthDecoder(nn.Module):
         """
         self.active_levels = max(2, min(int(n), self.no_levels))
 
-    def forward(self, input_features, input_grids=None):
+    def forward(self, input_features, input_grids=None, sem_bias=None):
+        """
+        sem_bias : optional (B, N_total_planes, H_s, W_s) tensor from
+                   SemanticPlaneGate — added to logits before softmax.
+                   Will be bilinearly upsampled to (H, W) if needed.
+        """
         self.outputs = {}
 
         # --- Adaptive plane range ----------------------------------------
@@ -689,6 +824,13 @@ class DepthDecoder(nn.Module):
         # Aggregate auxiliary logits from coarser scales (zero-init → identity at start)
         for al in aux_logits:
             logits = logits + F.interpolate(al, size=(H, W), mode='bilinear', align_corners=True)
+        # Semantic plane family bias: steer each family toward its natural
+        # semantic context (sky→XY, road→XZ, wall→YZ).  Gate starts at 0.
+        if sem_bias is not None:
+            if sem_bias.shape[-2:] != (H, W):
+                sem_bias = F.interpolate(sem_bias, size=(H, W),
+                                         mode='bilinear', align_corners=True)
+            logits = logits + sem_bias
         # Coarse-to-fine plane annealing: mask out logits for XY planes beyond
         # active_levels so they receive ~0 probability during early training.
         # XZ/YZ/learned channels (indices >= no_levels) are always active.
