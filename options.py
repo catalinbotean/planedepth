@@ -211,6 +211,14 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--use_confidence_smooth",
+                                 action="store_true",
+                                 help="If set, weight the disparity smoothness loss by the "
+                                      "inverse mixture variance (depth_confidence from "
+                                      "--use_mixture_loss). High-confidence regions are "
+                                      "pushed to be smooth; uncertain regions (boundaries, "
+                                      "sky) are relaxed. Falls back to plain smoothness "
+                                      "when disp_var is not available.")
         self.parser.add_argument("--alpha_normal_smooth",
                                  type=float,
                                  default=0.0,

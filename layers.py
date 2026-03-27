@@ -273,6 +273,43 @@ def get_smooth_loss_probability(probability, disp_layered, img, gamma=1):
     return grad_disp_x.mean() + grad_disp_y.mean()
 
 
+def get_smooth_loss_disp_confidence(disp, img, confidence, gamma=1):
+    """Confidence-weighted edge-aware disparity smoothness.
+
+    Extends get_smooth_loss_disp with a per-pixel confidence weight so that
+    the smoothness penalty is amplified in regions where the model is certain
+    (low mixture variance) and relaxed where the model is uncertain (object
+    boundaries, occluded regions, sky).
+
+    confidence : (B, 1, H, W) — e.g. 1 / (disp_var + eps).
+                  Will be normalised to have unit mean before weighting so
+                  the total loss magnitude is comparable to the plain loss.
+
+    The combined weight is:
+        w = exp(−γ · |∇I|) · conf_normalised
+    """
+    conf = confidence / (confidence.mean() + 1e-8)          # normalise
+
+    grad_disp_x = torch.abs(disp[:, :, :, :-1] - disp[:, :, :, 1:])
+    grad_disp_y = torch.abs(disp[:, :, :-1, :] - disp[:, :, 1:, :])
+
+    grad_img_x = torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]), 1, keepdim=True)
+    grad_img_y = torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :]), 1, keepdim=True)
+
+    # Edge-aware weight
+    w_x = torch.exp(-gamma * grad_img_x)                    # B, 1, H, W-1
+    w_y = torch.exp(-gamma * grad_img_y)                    # B, 1, H-1, W
+
+    # Confidence weight (average of neighbouring pixels, matching grad shape)
+    conf_x = (conf[:, :, :, :-1] + conf[:, :, :, 1:]) * 0.5
+    conf_y = (conf[:, :, :-1, :] + conf[:, :, 1:, :]) * 0.5
+
+    grad_disp_x = grad_disp_x * w_x * conf_x
+    grad_disp_y = grad_disp_y * w_y * conf_y
+
+    return grad_disp_x.mean() + grad_disp_y.mean()
+
+
 class SSIM(nn.Module):
     """Layer to compute the SSIM loss between a pair of images
     """

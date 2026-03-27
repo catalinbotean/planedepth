@@ -928,7 +928,20 @@ class Trainer:
         for k, v in losses.items():
             v /= len(self.target_sides)
             
-        smooth_loss = get_smooth_loss_disp(outputs["disp"][..., int(0.2 * W):], inputs[("color", "l")][..., int(0.2 * W):], gamma=self.opt.gamma_smooth)
+        # Confidence-weighted smoothness: when the mixture model provides
+        # disp_var, amplify smoothness in high-confidence regions and relax it
+        # near uncertain pixels (boundaries, occlusions, sky).
+        disp_crop = outputs["disp"][..., int(0.2 * W):]
+        img_crop  = inputs[("color", "l")][..., int(0.2 * W):]
+        if "disp_var" in outputs and self.opt.use_confidence_smooth:
+            conf_crop = outputs["disp_var"][..., int(0.2 * W):]
+            # disp_var = variance → invert for confidence
+            conf_crop = 1.0 / (conf_crop + 1e-4)
+            smooth_loss = get_smooth_loss_disp_confidence(
+                disp_crop, img_crop, conf_crop, gamma=self.opt.gamma_smooth)
+        else:
+            smooth_loss = get_smooth_loss_disp(
+                disp_crop, img_crop, gamma=self.opt.gamma_smooth)
         losses["loss/smooth_loss"] = smooth_loss
 
         losses["loss/total_loss"] += self.opt.alpha_smooth * smooth_loss
