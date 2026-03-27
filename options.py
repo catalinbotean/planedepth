@@ -206,6 +206,11 @@ class MonodepthOptions:
         self.parser.add_argument("--no_stereo",
                                  action="store_true",
                                  help="if set, disable stereo supervised")
+        self.parser.add_argument("--uncertainty_weighted_distillation",
+                                 action="store_true",
+                                 help="If set, weight the self-distillation loss by the teacher's "
+                                      "mixture-model confidence (low-variance teacher predictions "
+                                      "receive higher weight). Requires --use_mixture_loss.")
 
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size",

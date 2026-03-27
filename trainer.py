@@ -353,7 +353,8 @@ class Trainer:
             
         if self.opt.self_distillation > 0.:
             with torch.no_grad():
-                outputs["disp_pp"], outputs["mask_novel"] = self.generate_post_process_disp(inputs)
+                outputs["disp_pp"], outputs["mask_novel"], outputs["teacher_confidence"] = \
+                    self.generate_post_process_disp(inputs)
             
         if self.opt.alpha_self > 0.:
             self.pred_self_images(inputs, outputs)
@@ -470,7 +471,17 @@ class Trainer:
         mask_novel = F.grid_sample(outputs["probability"][:B, ...].reshape(B*N, 1, H, W), pix_coords_r, padding_mode="zeros", align_corners=True).reshape(B, N, H, W)
         mask_novel = mask_novel.sum(1, True)
         mask_novel[mask_novel>1] = 1
-        return disp_pp.detach(), mask_novel.detach()
+
+        # Teacher confidence from mixture model uncertainty (available when use_mixture_loss=True)
+        teacher_confidence = None
+        if "depth_confidence" in outputs:
+            # Average confidence across original and flipped teacher predictions
+            conf_orig   = outputs["depth_confidence"][:B, ...]          # B, 1, H, W
+            conf_flipped = outputs["depth_confidence"][B:, ...].flip(-1) # B, 1, H, W
+            teacher_confidence = (conf_orig + conf_flipped) * 0.5
+            teacher_confidence = teacher_confidence.detach()
+
+        return disp_pp.detach(), mask_novel.detach(), teacher_confidence
 
     def val(self):
         """Validate the model on a single minibatch
@@ -763,7 +774,14 @@ class Trainer:
                 total_loss += self.opt.alpha_self * self_loss
                 
             if self.opt.self_distillation > 0:
-                disp_loss = torch.abs(outputs["disp"] - outputs["disp_pp"]).mean()
+                disp_loss = torch.abs(outputs["disp"] - outputs["disp_pp"])
+                if self.opt.uncertainty_weighted_distillation and outputs.get("teacher_confidence") is not None:
+                    conf = outputs["teacher_confidence"]           # B, 1, H, W
+                    # Normalise so the effective batch size is preserved
+                    conf = conf / (conf.mean() + 1e-8)
+                    disp_loss = (disp_loss * conf).mean()
+                else:
+                    disp_loss = disp_loss.mean()
                 losses["loss/disp_loss"] = disp_loss
                 total_loss += self.opt.self_distillation * disp_loss
             
@@ -857,6 +875,10 @@ class Trainer:
                     writer.add_image(
                         "disp_pp/{}".format(self.epoch),
                         normalize_image(outputs["disp_pp"][j]), val_idx+j)
+                if "disp_var" in outputs:
+                    writer.add_image(
+                        "disp_var/{}".format(self.epoch),
+                        normalize_image(outputs["disp_var"][j]), val_idx+j)
 
             writer.add_image(
                 "disp/{}".format(self.epoch),

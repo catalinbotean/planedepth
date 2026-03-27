@@ -690,6 +690,21 @@ class DepthDecoder(nn.Module):
         #print(self.outputs["probability"][0, :, 200, 600].max())
         self.outputs["depth"] = 0.1 * 0.58 * W / self.outputs["disp"]
 
+        # Uncertainty from the Laplacian mixture model
+        # Var(disp) = within-component + between-component
+        #   within : sum_k pi_k * 2*sigma_k^2   (Laplacian variance = 2b^2)
+        #   between: sum_k pi_k * d_k^2 - mu_d^2
+        if self.use_mixture_loss:
+            _pi    = self.outputs["pi"]          # B, N, H, W  (soft weights before sigma rescaling)
+            _sigma = self.outputs["sigma"]       # B, N, H, W
+            _dk    = self.outputs["disp_layered"]  # B, N, H, W
+            _mu    = self.outputs["disp"]          # B, 1, H, W
+            within_var  = (_pi * 2.0 * _sigma.pow(2)).sum(1, keepdim=True)
+            between_var = (_pi * _dk.pow(2)).sum(1, keepdim=True) - _mu.pow(2)
+            disp_var    = within_var + between_var.clamp(min=0.0)
+            self.outputs["disp_var"]          = disp_var                    # B, 1, H, W
+            self.outputs["depth_confidence"]  = 1.0 / (disp_var + 1e-4)    # B, 1, H, W
+
         return self.outputs
     
     
