@@ -788,6 +788,8 @@ class Trainer:
         losses["loss/total_loss"] = 0
         if self.opt.alpha_lr_consistency > 0.:
             losses["loss/lr_consistency_loss"] = 0
+        if self.opt.alpha_entropy > 0.:
+            losses["loss/entropy"] = 0
 
         if self.opt.match_aug:
             color_name = "color_aug"
@@ -863,6 +865,18 @@ class Trainer:
             lr_loss = self.compute_lr_consistency_loss(outputs)
             losses["loss/lr_consistency_loss"] = lr_loss
             losses["loss/total_loss"] += self.opt.alpha_lr_consistency * lr_loss
+
+        # Mixture entropy regularization: penalise high-entropy (uniform) plane
+        # distributions.  H(π) = -Σ_k π_k log π_k ≥ 0; minimising H forces the
+        # network to commit to a single plane rather than hedging.
+        # We use "pi" (the soft, pre-sigma-rescaled weights) so the gradient
+        # flows through the raw softmax, not through the sigma normalisation.
+        if self.opt.alpha_entropy > 0.:
+            pi = outputs.get("pi", outputs["probability"])   # B, N, H, W
+            # clamp for numerical safety before log
+            entropy = -(pi * (pi + 1e-8).log()).sum(1).mean()
+            losses["loss/entropy"] = entropy
+            losses["loss/total_loss"] += self.opt.alpha_entropy * entropy
 
         return losses
 

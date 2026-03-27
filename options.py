@@ -211,6 +211,14 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--alpha_entropy",
+                                 type=float,
+                                 default=0.0,
+                                 help="Weight for mixture entropy regularization. "
+                                      "Penalises high-entropy (near-uniform) plane "
+                                      "distributions, forcing the network to commit to "
+                                      "a single depth plane rather than averaging many. "
+                                      "Typical range: 0.001–0.01.")
         self.parser.add_argument("--alpha_lr_consistency",
                                  type=float,
                                  default=0.0,
