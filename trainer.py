@@ -253,10 +253,37 @@ class Trainer:
         self.step = 0
         self.start_time = time.time()
         for self.epoch in range(self.opt.start_epoch, self.opt.num_epochs):
+            self._update_active_plane_levels()
             self.run_epoch()
             if dist.get_rank() == 0:
                 self.save_model("last_models")
                 
+    def _update_active_plane_levels(self):
+        """Coarse-to-fine plane annealing: linearly unlock XY plane levels.
+
+        When plane_anneal_start < disp_levels, training begins with only
+        plane_anneal_start XY planes active (coarser depth quantisation).
+        Over plane_anneal_epochs epochs the active count grows linearly to
+        disp_levels.  After that, all planes are unlocked for the remainder
+        of training.
+
+        Only applies to ResNet (DepthDecoder).  No-op when
+        plane_anneal_start == disp_levels (the default).
+        """
+        if self.opt.net_type != "ResNet":
+            return
+        n_start = self.opt.plane_anneal_start
+        n_final = self.opt.disp_levels
+        if n_start >= n_final:
+            return  # annealing disabled
+        t = min(self.epoch / max(self.opt.plane_anneal_epochs, 1), 1.0)
+        n_active = int(n_start + t * (n_final - n_start))
+        depth_model = self.models["depth"]
+        m = depth_model.module if hasattr(depth_model, "module") else depth_model
+        m.set_active_levels(n_active)
+        if dist.get_rank() == 0 and n_active < n_final:
+            print("Plane annealing: active XY levels = {}/{}".format(n_active, n_final))
+
     def add_flip_right_inputs(self, inputs):
         new_inputs = {}
         new_inputs[("color", "l")] = torch.cat([inputs[("color", "l")], inputs[("color", "r")].flip(-1)], dim=0)

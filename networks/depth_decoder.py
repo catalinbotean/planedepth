@@ -430,6 +430,16 @@ class DepthDecoder(nn.Module):
             self.learned_normals = nn.Parameter(init_normals)
 
 
+    def set_active_levels(self, n):
+        """Set the number of active XY plane levels for coarse-to-fine annealing.
+
+        Planes with index >= n (up to self.no_levels) will have their logits
+        forced to -1e9 so they receive essentially zero softmax weight.
+        XZ, YZ, and learned-family channels (indices >= no_levels) are unaffected.
+        Call at the start of each epoch from the trainer.
+        """
+        self.active_levels = max(2, min(int(n), self.no_levels))
+
     def forward(self, input_features, input_grids=None):
         self.outputs = {}
 
@@ -679,6 +689,12 @@ class DepthDecoder(nn.Module):
         # Aggregate auxiliary logits from coarser scales (zero-init → identity at start)
         for al in aux_logits:
             logits = logits + F.interpolate(al, size=(H, W), mode='bilinear', align_corners=True)
+        # Coarse-to-fine plane annealing: mask out logits for XY planes beyond
+        # active_levels so they receive ~0 probability during early training.
+        # XZ/YZ/learned channels (indices >= no_levels) are always active.
+        if hasattr(self, 'active_levels') and self.active_levels < self.no_levels:
+            logits = logits.clone()
+            logits[:, self.active_levels:self.no_levels] = -1e9
         logits = logits * padding_mask
         if self.use_cross_plane_attn:
             logits = self.cross_plane_attn(logits, disp_layered, padding_mask)

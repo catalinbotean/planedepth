@@ -211,6 +211,18 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--plane_anneal_start",
+                                 type=int,
+                                 default=49,
+                                 help="Number of active XY plane levels at epoch 0 for "
+                                      "coarse-to-fine plane annealing. Set < disp_levels "
+                                      "to enable (e.g. 10 or 25). Levels grow linearly to "
+                                      "disp_levels over --plane_anneal_epochs epochs.")
+        self.parser.add_argument("--plane_anneal_epochs",
+                                 type=int,
+                                 default=20,
+                                 help="Number of epochs over which active XY plane levels "
+                                      "grow from plane_anneal_start to disp_levels.")
         self.parser.add_argument("--focal_ph_gamma",
                                  type=float,
                                  default=0.0,
