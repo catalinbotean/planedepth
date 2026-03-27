@@ -220,7 +220,9 @@ class DepthDecoder(nn.Module):
                  render_probability=False,
                  plane_residual=False,
                  use_cross_plane_attn=False,
-                 cross_plane_attn_tau=1.0):
+                 cross_plane_attn_tau=1.0,
+                 adaptive_plane_range=False,
+                 adaptive_range_margin=1.099):  # log(3) ≈ 1.099 → factor-of-3 max shift
         super(DepthDecoder, self).__init__()
 
         self.no_levels = no_levels
@@ -316,11 +318,63 @@ class DepthDecoder(nn.Module):
                 n_yz=self.yz_levels,
                 tau=cross_plane_attn_tau,
             )
-        
+
+        # Adaptive plane range: predict per-image (d_near, d_far) from the encoder
+        # bottleneck so the XY plane grid concentrates resolution where the scene
+        # actually lives rather than using fixed [disp_min, disp_max] for every image.
+        #
+        # Math:  the standard log-spaced plane grid is
+        #
+        #   d_k = d_far · (d_near / d_far)^(k / (N-1))
+        #
+        # where d_far = disp_max (highest disparity ≡ nearest depth) and
+        # d_near = disp_min (lowest disparity ≡ farthest depth).  Here we make
+        # d_far and d_near image-dependent by predicting log-space offsets from
+        # the fixed defaults via a small bottleneck MLP:
+        #
+        #   log d_far(I)  = log(disp_max) + tanh(mlp(I)[0]) · margin
+        #   log d_near(I) = log(disp_min) + tanh(mlp(I)[1]) · margin
+        #
+        # `margin` bounds the maximum shift (default log(3) ≈ factor-of-3).
+        # Zero-bias initialisation ⟹ tanh(0) = 0 ⟹ identity at training start.
+        self.adaptive_plane_range = adaptive_plane_range
+        self.adaptive_range_margin = adaptive_range_margin
+        if adaptive_plane_range:
+            print("use adaptive plane range (margin={:.3f})".format(adaptive_range_margin))
+            self.range_head = nn.Sequential(
+                nn.AdaptiveAvgPool2d((1, 1)),
+                nn.Flatten(),
+                nn.Linear(num_ch_enc[-1], 64),
+                nn.ReLU(inplace=True),
+                nn.Linear(64, 2),  # → (Δ log d_far, Δ log d_near)
+            )
+
 
     def forward(self, input_features, input_grids=None):
         self.outputs = {}
-        
+
+        # --- Adaptive plane range ----------------------------------------
+        # Predict per-image disparity endpoints from the encoder bottleneck
+        # before any decoder processing.  Both scalars default to the fixed
+        # values when adaptive_plane_range is off.
+        if self.adaptive_plane_range:
+            offsets = self.range_head(input_features[-1])      # B, 2
+            log_d_far  = np.log(self.disp_max) + torch.tanh(offsets[:, 0]) * self.adaptive_range_margin
+            log_d_near = np.log(self.disp_min) + torch.tanh(offsets[:, 1]) * self.adaptive_range_margin
+            d_far  = torch.exp(log_d_far)                      # B
+            d_near = torch.exp(log_d_near)                     # B
+            # Guarantee d_near < d_far so the plane grid is always well-ordered
+            d_near = torch.min(d_near, d_far * 0.9)
+            self.outputs["d_far"]  = d_far
+            self.outputs["d_near"] = d_near
+            # Broadcast to (B, 1, 1, 1) for use in plane spacing formula
+            d_far_bc  = d_far[:, None, None, None]
+            d_near_bc = d_near[:, None, None, None]
+        else:
+            d_far_bc  = self.disp_max   # scalar — same behaviour as before
+            d_near_bc = self.disp_min
+        # -----------------------------------------------------------------
+
         if self.num_ep > 0:
             grids_ep = self.convs["epconv"](input_grids)
 
@@ -339,10 +393,10 @@ class DepthDecoder(nn.Module):
                 dgrid = F.interpolate(grids_ep, size=(x.shape[2], x.shape[3]), align_corners=True, mode='bilinear')
                 x = torch.cat([x, dgrid], dim=1)
             x = self.convs[("upconv", i, 1)](x)
-            
+
             if i == 4 and self.use_denseaspp:
                 x = self.convs["denseaspp"](x)
-                
+
         # angle = (self.sigmoid(self.convs["angleconv"](x).mean(dim=-1).mean(dim=-1)) - 0.5) * 0.75 * np.pi
 
         B, _, H, W = x.shape
@@ -351,7 +405,10 @@ class DepthDecoder(nn.Module):
         if self.plane_residual:
             residual_levels = self.sigmoid(self.convs["residualconv"](x)) - 0.5 #B, N, 1, 1
             disp_levels = disp_levels + residual_levels[:, :self.no_levels, ...]
-        disp_layered = self.disp_max * (self.disp_min / self.disp_max)**(disp_levels / (self.no_levels-1)) # B, N, 1, 1
+        # Log-spaced plane grid:  d_k = d_far · (d_near/d_far)^(k/(N-1))
+        # d_far_bc and d_near_bc are either per-image tensors (B,1,1,1)
+        # or plain scalars depending on adaptive_plane_range.
+        disp_layered = d_far_bc * (d_near_bc / d_far_bc) ** (disp_levels / (self.no_levels - 1))  # B, N, 1, 1
         distance = 0.1 * 0.58 * W / disp_layered[:, :, 0, 0]
         norm = torch.tensor([0, 0, 1]).cuda()[None, None, :].expand(B, self.no_levels, -1)
         disp_layered = disp_layered.expand(-1, -1, H, W)

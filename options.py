@@ -162,6 +162,16 @@ class MonodepthOptions:
                                  default=1.0,
                                  help="Temperature tau for the cross-plane geometric "
                                       "compatibility kernel (lower = sharper gates)")
+        self.parser.add_argument("--adaptive_plane_range",
+                                 action="store_true",
+                                 help="If set, predict per-image (d_near, d_far) from "
+                                      "the encoder bottleneck instead of using fixed "
+                                      "disp_min/disp_max for all images")
+        self.parser.add_argument("--adaptive_range_margin",
+                                 type=float,
+                                 default=1.099,
+                                 help="Max log-disparity shift for adaptive range head "
+                                      "(default log(3)≈1.099 allows factor-of-3 shift)")
         self.parser.add_argument("--no_crop",
                                  action="store_true",
                                  help="if set, do not use resize crop data aug")
