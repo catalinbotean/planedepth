@@ -110,14 +110,20 @@ optim    = torch.optim.Adam(params, lr=args.lr)
 def warp_right_to_left(img_r, disp_pixels):
     """
     img_r      : B, 3, H, W  — right image
-    disp_pixels: B, 1, H, W  — predicted disparity (pixels, positive → left)
+    disp_pixels: B, 1, H, W  — predicted disparity (pixels, positive)
     Returns warped image B, 3, H, W
+
+    Standard stereo convention: the right camera is to the RIGHT of the left.
+    A point at disparity d appears at x_right = x_left - d.
+    Therefore img_right[x] = img_left[x + d], and to reconstruct the left we
+    sample right at (x - d): warped_left[x] = img_right[x - d].
+    The synthetic right image below is created with the same convention.
     """
     xs = torch.arange(W, dtype=torch.float32, device=device)
     ys = torch.arange(H, dtype=torch.float32, device=device)
     gy, gx = torch.meshgrid(ys, xs, indexing="ij")  # H, W
-    # For each left pixel (x, y) sample right at (x + disp, y)
-    src_x = gx.unsqueeze(0).unsqueeze(0) + disp_pixels  # B, 1, H, W
+    # For each left pixel (x, y) sample right at (x - disp, y)
+    src_x = gx.unsqueeze(0).unsqueeze(0) - disp_pixels  # B, 1, H, W
     src_x_n = 2.0 * src_x / (W - 1) - 1.0
     src_y_n = 2.0 * gy.unsqueeze(0).unsqueeze(0).expand(B, 1, H, W) / (H - 1) - 1.0
     grid = torch.cat([src_x_n, src_y_n], dim=1)         # B, 2, H, W
