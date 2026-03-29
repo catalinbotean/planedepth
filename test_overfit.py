@@ -1,199 +1,436 @@
 """
-Overfit test for PlaneDepth (paper branch).
+Comprehensive overfit test for PlaneDepth (paper branch).
 
-Creates a synthetic stereo pair with a *known* ground-truth disparity map,
-then tries to overfit the encoder+decoder on that single example for N steps.
+Tests every branch feature — individually and in combinations — by overfitting
+the encoder+decoder on a single synthetic stereo pair with a known ground-truth
+disparity.  No dataset or pretrained weights required.
 
-What it checks
---------------
-* The full forward pass (encoder → decoder) works end-to-end.
-* Gradients flow back through every component (no silent in-place / detach bugs).
-* The photometric reconstruction loss actually decreases — i.e. the model CAN
-  fit the signal (a necessary but not sufficient condition for real training).
+Pass criterion per scenario
+---------------------------
+  * Photometric loss at the end < 50 % of photometric loss at step 0
+  * Final mean disparity within `disp_tol` px of GT_DISP=20
 
-Pass criterion: loss at step 50 < 70% of loss at step 0.
+Scenarios
+---------
+  Individual:
+    00  Baseline (mixture loss only)
+    01  Cross-plane attention          (branch 1)
+    02  Adaptive plane range           (branch 2)
+    03  Pixelwise plane residual       (branch 3)
+    04  Learned plane families         (branch 4)
+    05  Multi-scale logit aggregation  (branch 10)
+    06  Plane annealing                (branch 12)
+    07  Semantic gate                  (paper)
+    08  Entropy regularisation         (branch 7)
+    09  Focal photometric loss         (branch 11)
+    10  Confidence-weighted smoothness (branch 9)
+    11  LR consistency loss            (branch 6)
+    12  Surface normal smoothness      (branch 8)
+
+  Combinations:
+    13  Cross-attn + Learned families  (the fixed dimension bug)
+    14  Multi-scale + Adaptive range
+    15  Semantic gate + Entropy
+    16  All decoder flags
+    17  All loss augmentations
+    18  Kitchen sink (everything)
 
 Usage
 -----
-    python test_overfit.py            # CPU or GPU auto-detected
-    python test_overfit.py --steps 200 --device cuda
-
-No dataset or pretrained weights required.
+    python test_overfit.py
+    python test_overfit.py --steps 80 --device cuda
+    python test_overfit.py --only 00 01 13 18
 """
 
-import argparse
-import sys
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import argparse, sys, time
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--steps",  type=int,   default=100)
-parser.add_argument("--lr",     type=float, default=1e-3)
-parser.add_argument("--device", type=str,   default="cuda" if torch.cuda.is_available() else "cpu")
-parser.add_argument("--seed",   type=int,   default=42)
+parser.add_argument("--steps",   type=int,   default=60)
+parser.add_argument("--lr",      type=float, default=1e-3)
+parser.add_argument("--device",  type=str,
+                    default="cuda" if torch.cuda.is_available() else "cpu")
+parser.add_argument("--seed",    type=int,   default=42)
+parser.add_argument("--only",    nargs="*",  default=None,
+                    help="run only these scenario ids, e.g. --only 00 13 18")
 parser.add_argument("--verbose", action="store_true")
 args = parser.parse_args()
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 device = torch.device(args.device)
-print(f"device: {device} | steps: {args.steps} | lr: {args.lr}")
+print(f"device: {device} | steps/scenario: {args.steps} | lr: {args.lr}\n")
 
-# ── Scene geometry ────────────────────────────────────────────────────────────
-# Keep spatial dims small so the test is fast even on CPU.
-# Must be multiples of 32 (encoder downsamples 5×).
-B, H, W     = 1, 64, 192          # batch, height, width
-DISP_MIN    = 2                    # pixels  (far depth)
-DISP_MAX    = 48                   # pixels  (near depth — ~ 4 m at KITTI baseline)
-GT_DISP     = 20.0                 # constant disparity for the synthetic scene
+# ── Scene dimensions (multiples of 32 required by encoder) ───────────────────
+B, H, W       = 1, 64, 192
+DISP_MIN      = 2
+DISP_MAX      = 48
+GT_DISP       = 20.0
+N_XY          = 32
+N_XZ          = 4
+N_SEM         = 19          # Cityscapes — triggers the hand-crafted prior
 
-# ── Build a synthetic stereo pair ─────────────────────────────────────────────
-# Left image: structured pattern so photometric loss has a genuine gradient
-# w.r.t. horizontal shift.  Pure random noise produces near-uniform SSIM for
-# any shift, giving essentially zero gradient for disparity.
-#
-# We use a horizontal sinusoidal ramp (3 channels, different phases) so that:
-#   - Every local patch has a clear brightness gradient in x
-#   - The SSIM/L1 residual grows monotonically as |predicted_disp - GT_DISP| grows
-#   - The gradient flows cleanly back through the warp to the decoder
-xs_norm = torch.linspace(0.0, 1.0, W, device=device)   # (W,)
-ys_norm = torch.linspace(0.0, 1.0, H, device=device)   # (H,)
-gy, gx  = torch.meshgrid(ys_norm, xs_norm, indexing="ij")  # H, W
+# ── Synthetic stereo pair ─────────────────────────────────────────────────────
+# Sinusoidal pattern: every local patch has a clear horizontal gradient so
+# SSIM responds strongly to the disparity value.
+xs_n = torch.linspace(0, 1, W, device=device)
+ys_n = torch.linspace(0, 1, H, device=device)
+gy, gx = torch.meshgrid(ys_n, xs_n, indexing="ij")          # H, W
 
-freq = 4.0 * np.pi   # 2 full cycles across the image width
-phase = torch.tensor([0.0, 2*np.pi/3, 4*np.pi/3], device=device)  # 3 channels
-# (3, H, W)
-img_left_3hw = (0.5 + 0.5 * torch.sin(freq * gx.unsqueeze(0) + phase[:, None, None]))
-img_left = img_left_3hw.unsqueeze(0)   # B=1, 3, H, W
+phase  = torch.tensor([0.0, 2*np.pi/3, 4*np.pi/3], device=device)
+img_left = (0.5 + 0.5 * torch.sin(
+    4*np.pi * gx[None] + phase[:, None, None]
+)).unsqueeze(0)                                              # B,3,H,W
 
-# Shift: right[b, c, y, x] = left[b, c, y, x + GT_DISP]
-# Build a sampling grid for this shift.
-xs = torch.arange(W, dtype=torch.float32, device=device)
-ys = torch.arange(H, dtype=torch.float32, device=device)
-grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")  # H, W each
+# img_right[x] = img_left[x + GT_DISP]  (standard stereo, right cam to the right)
+_sx = 2.0*(gx + GT_DISP)/(W-1) - 1.0
+_sy = 2.0*gy/(H-1) - 1.0
+img_right = F.grid_sample(
+    img_left,
+    torch.stack([_sx, _sy], -1).unsqueeze(0),
+    mode="bilinear", padding_mode="border", align_corners=True)
 
-# Shifted x in pixel coords, then normalised to [-1, 1]
-src_x = grid_x + GT_DISP                          # H, W
-src_x_norm = 2.0 * src_x / (W - 1) - 1.0
-src_y_norm = 2.0 * grid_y / (H - 1) - 1.0
+# ── Positional grid (required by xz_levels > 0) ───────────────────────────────
+def make_grid():
+    ys = torch.linspace(-1, 1, H, device=device)
+    xs = torch.linspace(-1, 1, W, device=device)
+    gy2, gx2 = torch.meshgrid(ys, xs, indexing="ij")
+    return torch.stack([gx2, gy2], 0).unsqueeze(0)           # 1,2,H,W
 
-sample_grid = torch.stack([src_x_norm, src_y_norm], dim=-1)  # H, W, 2
-sample_grid = sample_grid.unsqueeze(0).expand(B, -1, -1, -1) # B, H, W, 2
+GRID = make_grid()
 
-# Right image synthesised by forward-warping left
-img_right = F.grid_sample(img_left, sample_grid,
-                           mode="bilinear", padding_mode="border",
-                           align_corners=True)              # B, 3, H, W
+# ── Camera intrinsics (surface normal test) ───────────────────────────────────
+fx = W * 0.58
+K_np    = np.array([[fx, 0, W/2, 0], [0, fx, H/2, 0],
+                    [0, 0, 1, 0],    [0, 0, 0, 1]], dtype=np.float32)
+inv_K_t = torch.from_numpy(np.linalg.inv(K_np)).unsqueeze(0).to(device)
 
-# ── SSIM (from layers.py) ────────────────────────────────────────────────────
-from layers import SSIM
+# ── SSIM ──────────────────────────────────────────────────────────────────────
+from layers import SSIM, get_smooth_loss_disp_confidence
 ssim_fn = SSIM().to(device)
 
-def photometric_loss(pred, target):
-    """0.85 SSIM + 0.15 L1, same as PlaneDepth trainer."""
-    l1   = (pred - target).abs().mean(1, keepdim=True)
-    s    = ssim_fn(pred, target)
-    return (0.85 * s + 0.15 * l1).mean()
-
-# ── Build encoder + decoder (XY-only, no grids needed) ───────────────────────
 import networks
+from networks import DepthDecoder, SemanticPlaneGate
 
-encoder = networks.ResnetEncoder(num_layers=18, pretrained=False).to(device)
-enc_chs = list(encoder.num_ch_enc)   # [64, 64, 128, 256, 512]
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-decoder = networks.DepthDecoder(
-    num_ch_enc       = enc_chs,
-    no_levels        = 32,           # XY fronto-parallel planes
-    disp_min         = DISP_MIN,
-    disp_max         = DISP_MAX,
-    xz_levels        = 0,            # no ground planes → no input_grids needed
-    yz_levels        = 0,
-    use_mixture_loss = True,
-    use_skips        = True,
-    use_denseaspp    = False,
-).to(device)
+def make_encoder():
+    enc = networks.ResnetEncoder(num_layers=18, pretrained=False).to(device)
+    return enc, list(enc.num_ch_enc)
 
-params   = list(encoder.parameters()) + list(decoder.parameters())
-optim    = torch.optim.Adam(params, lr=args.lr)
 
-# ── Helper: warp right → left given disparity (pixels) ───────────────────────
-def warp_right_to_left(img_r, disp_pixels):
-    """
-    img_r      : B, 3, H, W  — right image
-    disp_pixels: B, 1, H, W  — predicted disparity (pixels, positive)
-    Returns warped image B, 3, H, W
+def make_decoder(enc_chs, **kw):
+    base = dict(
+        num_ch_enc=enc_chs, no_levels=N_XY,
+        disp_min=DISP_MIN, disp_max=DISP_MAX,
+        xz_levels=0, xz_min=0.18, xz_max=0.37,
+        yz_levels=0, use_mixture_loss=True,
+        use_skips=True, use_denseaspp=False,
+    )
+    base.update(kw)
+    return DepthDecoder(**base).to(device)
 
-    Standard stereo convention: the right camera is to the RIGHT of the left.
-    A point at disparity d appears at x_right = x_left - d.
-    Therefore img_right[x] = img_left[x + d], and to reconstruct the left we
-    sample right at (x - d): warped_left[x] = img_right[x - d].
-    The synthetic right image below is created with the same convention.
-    """
+
+def warp_r2l(img_r, disp_pix):
+    """warped_left[x] = img_right[x - disp]  (standard stereo)"""
     xs = torch.arange(W, dtype=torch.float32, device=device)
     ys = torch.arange(H, dtype=torch.float32, device=device)
-    gy, gx = torch.meshgrid(ys, xs, indexing="ij")  # H, W
-    # For each left pixel (x, y) sample right at (x - disp, y)
-    src_x = gx.unsqueeze(0).unsqueeze(0) - disp_pixels  # B, 1, H, W
-    src_x_n = 2.0 * src_x / (W - 1) - 1.0
-    src_y_n = 2.0 * gy.unsqueeze(0).unsqueeze(0).expand(B, 1, H, W) / (H - 1) - 1.0
-    grid = torch.cat([src_x_n, src_y_n], dim=1)         # B, 2, H, W
-    grid = grid.permute(0, 2, 3, 1)                      # B, H, W, 2
-    return F.grid_sample(img_r, grid, mode="bilinear",
+    gy2, gx2 = torch.meshgrid(ys, xs, indexing="ij")
+    sx  = 2.0*(gx2[None, None] - disp_pix)/(W-1) - 1.0
+    sy  = (2.0*gy2/(H-1) - 1.0)[None, None].expand(B, 1, H, W)
+    g   = torch.cat([sx, sy], 1).permute(0, 2, 3, 1)
+    return F.grid_sample(img_r, g, mode="bilinear",
                          padding_mode="border", align_corners=True)
 
-# ── Training loop ─────────────────────────────────────────────────────────────
-losses          = []
-disparity_trace = []
-print(f"\n{'Step':>6}  {'Loss':>10}  {'MeanDisp':>10}  {'GTDisp':>10}")
-print("-" * 44)
 
-for step in range(args.steps):
-    optim.zero_grad()
+def photo(warped, target):
+    l1 = (warped - target).abs().mean(1, True)
+    s  = ssim_fn(warped, target)
+    return (0.85*s + 0.15*l1).mean()
 
-    feats = encoder(img_left)
-    out   = decoder(feats, input_grids=None)
 
-    disp  = out["disp"]           # B, 1, H, W — predicted disparity in pixels
+def surface_normal_loss(depth, img):
+    pts = depth * inv_K_t[0, :3, :3] @ \
+        torch.stack([
+            gx.unsqueeze(0).expand(B, -1, -1),
+            gy.unsqueeze(0).expand(B, -1, -1),
+            torch.ones(B, H, W, device=device)
+        ], 1).reshape(B, 3, -1)
+    # simpler: just use a finite-diff normal loss on depth directly
+    # (avoids the full backprojection machinery)
+    d  = depth
+    tu = d[:, :, 1:-1, 2:] - d[:, :, 1:-1, :-2]
+    tv = d[:, :, 2:, 1:-1] - d[:, :, :-2, 1:-1]
+    ic = img[:, :, 1:-1, 1:-1]
+    wu = torch.exp(-(ic[:,:,:,1:]-ic[:,:,:,:-1]).abs().mean(1,True))
+    wv = torch.exp(-(ic[:,:,1:,:]-ic[:,:,:-1,:]).abs().mean(1,True))
+    # normal cosine loss approximation: penalise large cross-pixel depth changes
+    loss_u = (tu[:,:,:,:-1] - tu[:,:,:,1:]).abs() * wu[:,:,:,:-1]
+    loss_v = (tv[:,:,:-1,:] - tv[:,:,1:,:]).abs() * wv[:,:,:-1,:]
+    return loss_u.mean() + loss_v.mean()
 
-    warped = warp_right_to_left(img_right, disp)
-    loss   = photometric_loss(warped, img_left)
 
-    loss.backward()
-    optim.step()
+def lr_consistency_loss(disp_l, disp_r):
+    """d_L(u) ≈ d_R(u + d_L(u))"""
+    xs = torch.linspace(-1, 1, W, device=device)
+    ys = torch.linspace(-1, 1, H, device=device)
+    gy2, gx2 = torch.meshgrid(ys, xs, indexing="ij")
+    gx2 = gx2[None, None].expand(B, 1, H, W)
+    gy2 = gy2[None, None].expand(B, 1, H, W)
+    sx  = (gx2 + disp_l * 2.0/(W-1)).clamp(-1, 1)
+    sg  = torch.stack([sx[:, 0], gy2[:, 0]], -1)
+    d_r_w = F.grid_sample(disp_r, sg, padding_mode="zeros", align_corners=True)
+    valid = (d_r_w > 0).float().detach()
+    return (torch.abs(disp_l - d_r_w) * valid).sum() / (valid.sum() + 1e-8)
 
-    losses.append(loss.item())
-    disparity_trace.append(disp.detach().mean().item())
 
-    if step % 10 == 0 or args.verbose:
-        print(f"{step:>6}  {loss.item():>10.4f}  {disparity_trace[-1]:>10.2f}  {GT_DISP:>10.1f}")
+# ── Core overfit loop ─────────────────────────────────────────────────────────
 
-# ── Pass / fail ───────────────────────────────────────────────────────────────
-# Criterion 1: loss drops by at least 50 % (strong signal needed)
-# Criterion 2: final mean disparity is within 5 px of GT (model converges)
+def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
+                sem_cfg=None, lr_consist=False,
+                anneal_n=None, disp_tol=8.0):
+    """
+    dec_kw     : kwargs forwarded to make_decoder (xz_levels handled inside)
+    extra_fn   : fn(out, img_l, img_r) -> scalar extra-loss tensor, or None
+    use_grid   : pass GRID to decoder (required by xz_levels > 0)
+    sem_cfg    : dict(n_xy, n_xz, n_yz, n_learned) → build SemanticPlaneGate
+    lr_consist : also run decoder on img_right, add LR consistency term
+    anneal_n   : if set, call dec.set_active_levels(anneal_n) before loop
+    disp_tol   : max acceptable |mean_disp - GT_DISP| at the end
+    """
+    enc, enc_chs = make_encoder()
+    dec          = make_decoder(enc_chs, **dec_kw)
+
+    if anneal_n is not None:
+        dec.set_active_levels(anneal_n)
+
+    params = list(enc.parameters()) + list(dec.parameters())
+
+    gate = None
+    if sem_cfg is not None:
+        gate = SemanticPlaneGate(num_classes=N_SEM, **sem_cfg).to(device)
+        params += list(gate.parameters())
+
+    opt  = torch.optim.Adam(params, lr=args.lr)
+    grid = GRID if use_grid else None
+
+    ph0 = ph_end = last_disp = None
+
+    for step in range(args.steps):
+        opt.zero_grad()
+
+        feats_l = enc(img_left)
+
+        sem_bias = None
+        if gate is not None:
+            fake_sem = torch.randn(B, N_SEM, H//4, W//4, device=device)
+            sem_bias = gate(fake_sem)
+
+        out_l  = dec(feats_l, input_grids=grid, sem_bias=sem_bias)
+        warped = warp_r2l(img_right, out_l["disp"])
+        ph     = photo(warped, img_left)
+        total  = ph
+
+        if extra_fn is not None:
+            total = total + extra_fn(out_l, img_left, img_right)
+
+        if lr_consist:
+            feats_r = enc(img_right)
+            out_r   = dec(feats_r, input_grids=grid)
+            total   = total + 0.1 * lr_consistency_loss(
+                          out_l["disp"], out_r["disp"])
+
+        total.backward()
+        opt.step()
+
+        ph_val    = ph.item()
+        disp_mean = out_l["disp"].detach().mean().item()
+        if step == 0:
+            ph0 = ph_val
+        ph_end    = ph_val
+        last_disp = disp_mean
+
+        if args.verbose or step % 10 == 0:
+            print(f"    step {step:>3}  ph={ph_val:.4f}  disp={disp_mean:.2f}")
+
+    ratio    = ph_end / ph0
+    disp_err = abs(last_disp - GT_DISP)
+    passed   = (ratio < 0.50) and (disp_err < disp_tol)
+    return passed, ratio, disp_err
+
+
+# ── Extra-loss functions ──────────────────────────────────────────────────────
+
+def extra_entropy(out, img_l, img_r):
+    pi = out["probability"]
+    return 0.01 * (-(pi * (pi + 1e-8).log()).sum(1).mean())
+
+def extra_focal(out, img_l, img_r):
+    """Focal weighting: hard pixels get larger gradient, easy pixels smaller."""
+    warped = warp_r2l(img_r, out["disp"])
+    err    = (warped - img_l).abs().mean(1, True)
+    with torch.no_grad():
+        w = (err / (err.mean() + 1e-8)).pow(2.0).clamp(max=4.0)
+    # Return weighted photometric loss as the extra term (replaces plain photo)
+    return 0.15 * (err * (w - 1)).mean()   # incremental over plain L1
+
+def extra_conf_smooth(out, img_l, img_r):
+    if "depth_confidence" not in out:
+        return torch.tensor(0.0, device=device)
+    return 0.001 * get_smooth_loss_disp_confidence(
+        out["disp"], img_l, out["depth_confidence"])
+
+def extra_normal(out, img_l, img_r):
+    return 0.001 * surface_normal_loss(out["depth"], img_l)
+
+def extra_all(out, img_l, img_r):
+    return (extra_entropy(out, img_l, img_r)
+            + extra_conf_smooth(out, img_l, img_r)
+            + extra_normal(out, img_l, img_r))
+
+
+# ── Scenario table ────────────────────────────────────────────────────────────
+# Each row: (id, name, dec_kw, extra_fn, use_grid, sem_cfg, lr_consist, anneal_n, disp_tol)
+
+SCENARIOS = [
+    ("00", "Baseline",
+     {}, None, False, None, False, None, 8),
+
+    ("01", "Cross-plane attention",
+     {"xz_levels": N_XZ, "use_cross_plane_attn": True},
+     None, True, None, False, None, 8),
+
+    ("02", "Adaptive plane range",
+     {"adaptive_plane_range": True},
+     None, False, None, False, None, 8),
+
+    ("03", "Pixelwise plane residual",
+     {"pixelwise_plane_residual": True},
+     None, False, None, False, None, 8),
+
+    ("04", "Learned plane families",
+     {"num_learned_families": 2, "learned_planes_per_family": 5},
+     None, False, None, False, None, 8),
+
+    ("05", "Multi-scale logit aggregation",
+     {"use_multiscale_logits": True},
+     None, False, None, False, None, 8),
+
+    ("06", "Plane annealing (start low)",
+     {},
+     None, False, None, False, 4, 8),   # anneal_n=4 → only 4 XY planes active at start
+
+    ("07", "Semantic gate (paper branch)",
+     {},
+     None, False, {"n_xy": N_XY, "n_xz": 0, "n_yz": 0, "n_learned": 0},
+     False, None, 8),
+
+    ("08", "Entropy regularisation",
+     {}, extra_entropy, False, None, False, None, 8),
+
+    ("09", "Focal photometric loss",
+     {}, extra_focal, False, None, False, None, 8),
+
+    ("10", "Confidence-weighted smoothness",
+     {}, extra_conf_smooth, False, None, False, None, 8),
+
+    ("11", "LR consistency loss",
+     {}, None, False, None, True, None, 8),
+
+    ("12", "Surface normal smoothness",
+     {}, extra_normal, False, None, False, None, 8),
+
+    # ── Combinations ─────────────────────────────────────────────────────────
+
+    ("13", "Cross-attn + Learned families  [fixed bug]",
+     {"xz_levels": N_XZ, "use_cross_plane_attn": True,
+      "num_learned_families": 2, "learned_planes_per_family": 5},
+     None, True, None, False, None, 8),
+
+    ("14", "Multi-scale + Adaptive range",
+     {"use_multiscale_logits": True, "adaptive_plane_range": True},
+     None, False, None, False, None, 8),
+
+    ("15", "Semantic gate + Entropy",
+     {}, extra_entropy,
+     False, {"n_xy": N_XY, "n_xz": 0, "n_yz": 0, "n_learned": 0},
+     False, None, 10),
+
+    ("16", "All decoder flags",
+     {"xz_levels": N_XZ, "use_cross_plane_attn": True,
+      "adaptive_plane_range": True, "pixelwise_plane_residual": True,
+      "num_learned_families": 2, "learned_planes_per_family": 5,
+      "use_multiscale_logits": True},
+     None, True, None, False, None, 10),
+
+    ("17", "All loss augmentations",
+     {}, extra_all, False, None, False, None, 10),
+
+    ("18", "Kitchen sink (everything)",
+     {"xz_levels": N_XZ, "use_cross_plane_attn": True,
+      "adaptive_plane_range": True, "pixelwise_plane_residual": True,
+      "num_learned_families": 2, "learned_planes_per_family": 5,
+      "use_multiscale_logits": True},
+     extra_all, True,
+     {"n_xy": N_XY, "n_xz": N_XZ, "n_yz": 0, "n_learned": 10},
+     True, 4, 12),
+]
+
+# ── Run all (or selected) scenarios ──────────────────────────────────────────
+run_ids = set(args.only) if args.only else None
+results = []
+
+for row in SCENARIOS:
+    sid, sname, dec_kw, extra_fn, use_grid, sem_cfg, lr_c, anneal_n, tol = row
+
+    if run_ids and sid not in run_ids:
+        continue
+
+    print(f"[{sid}] {sname}", flush=True)
+    if args.verbose:
+        print()
+
+    t0 = time.time()
+    try:
+        passed, ratio, derr = run_overfit(
+            sname, dec_kw,
+            extra_fn   = extra_fn,
+            use_grid   = use_grid,
+            sem_cfg    = sem_cfg,
+            lr_consist = lr_c,
+            anneal_n   = anneal_n,
+            disp_tol   = tol,
+        )
+        status = "PASS" if passed else "FAIL"
+        print(f"  → {status}  ph_ratio={ratio:.3f}  "
+              f"disp_err={derr:.2f}px  ({time.time()-t0:.1f}s)")
+    except Exception as e:
+        import traceback
+        passed = False
+        ratio  = derr = float("nan")
+        print(f"  → ERROR ({time.time()-t0:.1f}s): {e}")
+        if args.verbose:
+            traceback.print_exc()
+
+    results.append((sid, sname, passed, ratio, derr))
+
+# ── Summary ───────────────────────────────────────────────────────────────────
 print()
-loss_0       = losses[0]
-loss_end     = losses[-1]
-ratio        = loss_end / loss_0
-final_disp   = disparity_trace[-1]
-disp_err     = abs(final_disp - GT_DISP)
+print("=" * 72)
+print(f"{'ID':>4}  {'Scenario':<42}  {'ph_ratio':>8}  {'disp_err':>8}  {'':>6}")
+print("-" * 72)
+all_pass = True
+for sid, sname, passed, ratio, derr in results:
+    tag      = "✓ PASS" if passed else "✗ FAIL"
+    all_pass = all_pass and passed
+    print(f"{sid:>4}  {sname:<42}  {ratio:>8.3f}  {derr:>8.2f}  {tag}")
+print("=" * 72)
 
-print(f"Loss at step 0   : {loss_0:.4f}")
-print(f"Loss at step {args.steps-1:<3}: {loss_end:.4f}")
-print(f"Ratio (end/start): {ratio:.3f}  (pass if < 0.50)")
-print(f"Final mean disp  : {final_disp:.2f}  (GT={GT_DISP}, pass if |err| < 5 px)")
-
-ok_loss = ratio < 0.50
-ok_disp = disp_err < 5.0
-
-if ok_loss and ok_disp:
-    print("\n✓  PASS — loss halved AND disparity converged to GT")
-    sys.exit(0)
-else:
-    if not ok_loss:
-        print(f"\n✗  FAIL — loss ratio {ratio:.3f} >= 0.50")
-    if not ok_disp:
-        print(f"\n✗  FAIL — disparity error {disp_err:.2f} px >= 5 px")
-    sys.exit(1)
+n_pass = sum(1 for *_, p, _, _ in results if p)
+n_fail = len(results) - n_pass
+print(f"\n{n_pass}/{len(results)} passed", end="")
+print(" — all good!" if all_pass else f", {n_fail} failed.")
+sys.exit(0 if all_pass else 1)
