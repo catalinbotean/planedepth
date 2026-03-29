@@ -141,6 +141,18 @@ def make_decoder(enc_chs, **kw):
     return DepthDecoder(**base).to(device)
 
 
+def warp_l2r(img_l, disp_pix):
+    """warped_right[x] = img_left[x + disp]  (inverse stereo warp)"""
+    xs = torch.arange(W, dtype=torch.float32, device=device)
+    ys = torch.arange(H, dtype=torch.float32, device=device)
+    gy2, gx2 = torch.meshgrid(ys, xs, indexing="ij")
+    sx  = 2.0*(gx2[None, None] + disp_pix)/(W-1) - 1.0
+    sy  = (2.0*gy2/(H-1) - 1.0)[None, None].expand(B, 1, H, W)
+    g   = torch.cat([sx, sy], 1).permute(0, 2, 3, 1)
+    return F.grid_sample(img_l, g, mode="bilinear",
+                         padding_mode="border", align_corners=True)
+
+
 def warp_r2l(img_r, disp_pix):
     """warped_left[x] = img_right[x - disp]  (standard stereo)"""
     xs = torch.arange(W, dtype=torch.float32, device=device)
@@ -247,8 +259,12 @@ def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
         if lr_consist:
             feats_r = enc(img_right)
             out_r   = dec(feats_r, input_grids=grid)
-            total   = total + 0.01 * lr_consistency_loss(
-                          out_l["disp"], out_r["disp"])
+            # Right decoder also needs a photometric signal, otherwise it only
+            # receives gradients from the consistency term and anchors both
+            # decoders at an equilibrium far from GT_DISP.
+            ph_r  = photo(warp_l2r(img_left, out_r["disp"]), img_right)
+            total = total + ph_r + 0.01 * lr_consistency_loss(
+                        out_l["disp"], out_r["disp"])
 
         total.backward()
         opt.step()
