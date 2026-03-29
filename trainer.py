@@ -385,7 +385,8 @@ class Trainer:
                 if dist.get_rank() == 0:
                     self.log_time(batch_idx, duration, losses)
 
-                    losses.update(self.compute_depth_losses(inputs, outputs))
+                    if ("depth_gt", "l") in inputs:
+                        losses.update(self.compute_depth_losses(inputs, outputs))
 
                     self.log("train", losses)
 
@@ -577,14 +578,15 @@ class Trainer:
                 elif self.opt.net_type == "FalNet":
                     outputs = self.models["fal"](inputs[("color_aug", "l")])
                 
-                losses = self.compute_depth_losses(inputs, outputs)
                 B = inputs[("color_aug", "l")].shape[0]
-                num += B
-                for k,v in losses.items():
-                    if k in metrics:
-                        metrics[k] += v * B
-                    else:
-                        metrics[k] = v * B
+                if ("depth_gt", "l") in inputs:
+                    losses = self.compute_depth_losses(inputs, outputs)
+                    num += B
+                    for k, v in losses.items():
+                        if k in metrics:
+                            metrics[k] += v * B
+                        else:
+                            metrics[k] = v * B
                 
                 if batch_idx % self.opt.log_img_frequency == 0 and self.local_rank == 0:
                     self.log_img("val", inputs, outputs, batch_idx)
@@ -596,18 +598,22 @@ class Trainer:
             for k,v in metrics.items():
                 dist.all_reduce(metrics[k], op=dist.ReduceOp.SUM)
                 metrics[k] = metrics[k] / num
-            if metrics["de/abs_rel"] < self.best_absrel:
+
+            has_depth_metrics = "de/abs_rel" in metrics
+            if has_depth_metrics and metrics["de/abs_rel"] < self.best_absrel:
                 self.best_absrel = metrics["de/abs_rel"]
                 if self.local_rank == 0:
                     self.save_model("best_models")
-                    
+
             if self.local_rank == 0:
-                self.log("val", metrics)
-                print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
-                print(("&{: 8.4f}  " * 7).format(*[metrics[k].cpu().data[0] for k in self.depth_metric_names]) + "\\\\")
+                if has_depth_metrics:
+                    self.log("val", metrics)
+                    print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
+                    print(("&{: 8.4f}  " * 7).format(*[metrics[k].cpu().data[0] for k in self.depth_metric_names]) + "\\\\")
                 #write to log file
-                print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"), file=self.log_file)
-                print(("&{: 8.4f}  " * 7).format(*[metrics[k].cpu().data[0] for k in self.depth_metric_names]) + "\\\\", file=self.log_file)
+                if has_depth_metrics:
+                    print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"), file=self.log_file)
+                    print(("&{: 8.4f}  " * 7).format(*[metrics[k].cpu().data[0] for k in self.depth_metric_names]) + "\\\\", file=self.log_file)
         self.set_train()
 
     def pred_novel_images(self, inputs, outputs):
