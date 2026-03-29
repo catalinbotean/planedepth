@@ -129,8 +129,11 @@ def download_model_if_doesnt_exist(model_name):
 
 
 import collections
-from torch._six import string_classes
 import re
+try:
+    from torch._six import string_classes
+except ImportError:
+    string_classes = (str,)  # torch._six removed in PyTorch 1.10+
 import torch
 
 np_str_obj_array_pattern = re.compile(r'[SaUO]')
