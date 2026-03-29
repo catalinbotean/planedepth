@@ -839,7 +839,18 @@ class DepthDecoder(nn.Module):
             logits[:, self.active_levels:self.no_levels] = -1e9
         logits = logits * padding_mask
         if self.use_cross_plane_attn:
-            logits = self.cross_plane_attn(logits, disp_layered, padding_mask)
+            # Cross-plane attention only touches the fixed-geometry families
+            # (XY / XZ / YZ). Learned-family channels are passed through unchanged.
+            f = self.fixed_levels
+            logits_fixed = self.cross_plane_attn(
+                logits[:, :f],
+                disp_layered[:, :f],
+                padding_mask[:, :f],
+            )
+            if self.all_levels > f:
+                logits = torch.cat([logits_fixed, logits[:, f:]], dim=1)
+            else:
+                logits = logits_fixed
         self.outputs["logits"] = logits
         if self.render_probability:
             depth_layered = 0.1 * 0.58 * W / disp_layered
