@@ -128,73 +128,16 @@ def download_model_if_doesnt_exist(model_name):
         print("   Model unzipped to {}".format(model_path))
 
 
-import collections
-import re
-try:
-    from torch._six import string_classes
-except ImportError:
-    string_classes = (str,)  # torch._six removed in PyTorch 1.10+
-import torch
-
-np_str_obj_array_pattern = re.compile(r'[SaUO]')
-default_collate_err_msg_format = (
-    "default_collate: batch must contain tensors, numpy arrays, numbers, "
-    "dicts or lists; found {}")
-
-def rmnone_collate(batch):
-    batch_new = []
-    for v in batch:
-        if v is not None:
-            batch_new.append(v)
-    batch = batch_new
-    if len(batch) == 0:
-        return None
-    else:
-        return default_collate(batch)
+from torch.utils.data.dataloader import default_collate as _torch_default_collate
 
 def default_collate(batch):
-    r"""Puts each data field into a tensor with outer dimension batch size"""
-    elem = batch[0]
-    elem_type = type(elem)
-    if isinstance(elem, torch.Tensor):
-        out = None
-        if torch.utils.data.get_worker_info() is not None:
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum(x.numel() for x in batch)
-            storage = elem.storage()._new_shared(numel)
-            out = elem.new(storage)
-        return torch.stack(batch, 0, out=out)
-    elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
-            and elem_type.__name__ != 'string_':
-        if elem_type.__name__ == 'ndarray' or elem_type.__name__ == 'memmap':
-            # array of string classes and object
-            if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
-                raise TypeError(default_collate_err_msg_format.format(elem.dtype))
+    return _torch_default_collate(batch)
 
-            return default_collate([torch.as_tensor(b) for b in batch])
-        elif elem.shape == ():  # scalars
-            return torch.as_tensor(batch)
-    elif isinstance(elem, float):
-        return torch.tensor(batch, dtype=torch.float64)
-    elif isinstance(elem, int):
-        return torch.tensor(batch)
-    elif isinstance(elem, string_classes):
-        return batch
-    elif isinstance(elem, collections.abc.Mapping):
-        return {key: default_collate([d[key] for d in batch]) for key in elem}
-    elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
-        return elem_type(*(default_collate(samples) for samples in zip(*batch)))
-    elif isinstance(elem, collections.abc.Sequence):
-        # check to make sure that the elements in batch have consistent size
-        it = iter(batch)
-        elem_size = len(next(it))
-        if not all(len(elem) == elem_size for elem in it):
-            raise RuntimeError('each element in list of batch should be of equal size')
-        transposed = zip(*batch)
-        return [default_collate(samples) for samples in transposed]
-
-    raise TypeError(default_collate_err_msg_format.format(elem_type))
+def rmnone_collate(batch):
+    batch = [v for v in batch if v is not None]
+    if len(batch) == 0:
+        return None
+    return default_collate(batch)
 
 def preprocess_image(image, delta=0.01, x_length=40, y_length=35):
     # image should be float between [0, 1] with size HWC
