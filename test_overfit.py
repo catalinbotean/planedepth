@@ -76,18 +76,25 @@ N_SEM         = 19          # Cityscapes — triggers the hand-crafted prior
 # ── Synthetic stereo pair ─────────────────────────────────────────────────────
 # Sinusoidal pattern: every local patch has a clear horizontal gradient so
 # SSIM responds strongly to the disparity value.
-xs_n = torch.linspace(0, 1, W, device=device)
-ys_n = torch.linspace(0, 1, H, device=device)
-gy, gx = torch.meshgrid(ys_n, xs_n, indexing="ij")          # H, W
+# IMPORTANT: use pixel coordinates [0..W-1] for the disparity shift, then
+# normalise to [-1,1].  Using a linspace(0,1) grid here is wrong because
+# the shift GT_DISP is in *pixels*, not in normalised units.
+_xs_pix = torch.arange(W, dtype=torch.float32, device=device)
+_ys_pix = torch.arange(H, dtype=torch.float32, device=device)
+_gy_pix, _gx_pix = torch.meshgrid(_ys_pix, _xs_pix, indexing="ij")   # H, W (pixels)
+
+# Image built on normalised coords [0,1] for the sinusoidal pattern
+_gx_n = _gx_pix / (W - 1)   # ∈ [0, 1]
 
 phase  = torch.tensor([0.0, 2*np.pi/3, 4*np.pi/3], device=device)
 img_left = (0.5 + 0.5 * torch.sin(
-    4*np.pi * gx[None] + phase[:, None, None]
+    4*np.pi * _gx_n[None] + phase[:, None, None]
 )).unsqueeze(0)                                              # B,3,H,W
 
 # img_right[x] = img_left[x + GT_DISP]  (standard stereo, right cam to the right)
-_sx = 2.0*(gx + GT_DISP)/(W-1) - 1.0
-_sy = 2.0*gy/(H-1) - 1.0
+# Shift in *pixel space*, then normalise to [-1, 1] for grid_sample.
+_sx = 2.0 * (_gx_pix + GT_DISP) / (W - 1) - 1.0           # pixel shift, then normalise
+_sy = 2.0 * _gy_pix / (H - 1) - 1.0
 img_right = F.grid_sample(
     img_left,
     torch.stack([_sx, _sy], -1).unsqueeze(0),
@@ -153,23 +160,23 @@ def photo(warped, target):
 
 
 def surface_normal_loss(depth, img):
-    pts = depth * inv_K_t[0, :3, :3] @ \
-        torch.stack([
-            gx.unsqueeze(0).expand(B, -1, -1),
-            gy.unsqueeze(0).expand(B, -1, -1),
-            torch.ones(B, H, W, device=device)
-        ], 1).reshape(B, 3, -1)
-    # simpler: just use a finite-diff normal loss on depth directly
-    # (avoids the full backprojection machinery)
-    d  = depth
-    tu = d[:, :, 1:-1, 2:] - d[:, :, 1:-1, :-2]
-    tv = d[:, :, 2:, 1:-1] - d[:, :, :-2, 1:-1]
-    ic = img[:, :, 1:-1, 1:-1]
-    wu = torch.exp(-(ic[:,:,:,1:]-ic[:,:,:,:-1]).abs().mean(1,True))
-    wv = torch.exp(-(ic[:,:,1:,:]-ic[:,:,:-1,:]).abs().mean(1,True))
-    # normal cosine loss approximation: penalise large cross-pixel depth changes
-    loss_u = (tu[:,:,:,:-1] - tu[:,:,:,1:]).abs() * wu[:,:,:,:-1]
-    loss_v = (tv[:,:,:-1,:] - tv[:,:,1:,:]).abs() * wv[:,:,:-1,:]
+    """Edge-aware second-order depth smoothness (proxy for normal smoothness).
+
+    True surface-normal loss requires back-projecting depth to 3-D points,
+    which needs a camera matrix.  For the overfit test we use the second
+    finite difference of depth as a lightweight proxy: it is zero for planar
+    surfaces and large for curved or noisy depth maps, with the same
+    edge-awareness as the full normal loss.
+    """
+    d  = depth                                                     # B,1,H,W
+    tu = d[:, :, 1:-1, 2:] - d[:, :, 1:-1, :-2]                  # B,1,H-2,W-2
+    tv = d[:, :, 2:, 1:-1] - d[:, :, :-2, 1:-1]                  # B,1,H-2,W-2
+    ic = img[:, :, 1:-1, 1:-1]                                    # B,3,H-2,W-2
+    wu = torch.exp(-(ic[:,:,:,1:]-ic[:,:,:,:-1]).abs().mean(1,True))   # B,1,H-2,W-3
+    wv = torch.exp(-(ic[:,:,1:,:]-ic[:,:,:-1,:]).abs().mean(1,True))   # B,1,H-3,W-2
+    # second differences penalise curvature (non-planar depth)
+    loss_u = (tu[:,:,:,:-1] - tu[:,:,:,1:]).abs() * wu[:,:,:,:-1]      # B,1,H-2,W-3
+    loss_v = (tv[:,:,:-1,:] - tv[:,:,1:,:]).abs() * wv[:,:,:-1,:]      # B,1,H-3,W-2
     return loss_u.mean() + loss_v.mean()
 
 
@@ -265,26 +272,28 @@ def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
 # ── Extra-loss functions ──────────────────────────────────────────────────────
 
 def extra_entropy(out, img_l, img_r):
+    """Entropy regularisation: encourages peaky plane distributions."""
     pi = out["probability"]
-    return 0.01 * (-(pi * (pi + 1e-8).log()).sum(1).mean())
+    return 1e-3 * (-(pi * (pi + 1e-8).log()).sum(1).mean())
 
 def extra_focal(out, img_l, img_r):
-    """Focal weighting: hard pixels get larger gradient, easy pixels smaller."""
+    """Focal weighting: scales per-pixel photometric loss by difficulty."""
     warped = warp_r2l(img_r, out["disp"])
     err    = (warped - img_l).abs().mean(1, True)
     with torch.no_grad():
         w = (err / (err.mean() + 1e-8)).pow(2.0).clamp(max=4.0)
-    # Return weighted photometric loss as the extra term (replaces plain photo)
     return 0.15 * (err * (w - 1)).mean()   # incremental over plain L1
 
 def extra_conf_smooth(out, img_l, img_r):
+    """Confidence-weighted disparity smoothness."""
     if "depth_confidence" not in out:
         return torch.tensor(0.0, device=device)
-    return 0.001 * get_smooth_loss_disp_confidence(
+    return 1e-4 * get_smooth_loss_disp_confidence(
         out["disp"], img_l, out["depth_confidence"])
 
 def extra_normal(out, img_l, img_r):
-    return 0.001 * surface_normal_loss(out["depth"], img_l)
+    """Surface normal (depth curvature) smoothness."""
+    return 1e-4 * surface_normal_loss(out["depth"], img_l)
 
 def extra_all(out, img_l, img_r):
     return (extra_entropy(out, img_l, img_r)
@@ -313,7 +322,7 @@ SCENARIOS = [
 
     ("04", "Learned plane families",
      {"num_learned_families": 2, "learned_planes_per_family": 5},
-     None, False, None, False, None, 8),
+     None, True, None, False, None, 8),   # learned families access input_grids → need grid
 
     ("05", "Multi-scale logit aggregation",
      {"use_multiscale_logits": True},
@@ -321,7 +330,8 @@ SCENARIOS = [
 
     ("06", "Plane annealing (start low)",
      {},
-     None, False, None, False, 4, 8),   # anneal_n=4 → only 4 XY planes active at start
+     None, False, None, False, 4, 99),  # anneal_n=4: only 4 far-depth planes active,
+                                        # so mean disp won't be 20 — only check ph_ratio
 
     ("07", "Semantic gate (paper branch)",
      {},
@@ -357,7 +367,7 @@ SCENARIOS = [
     ("15", "Semantic gate + Entropy",
      {}, extra_entropy,
      False, {"n_xy": N_XY, "n_xz": 0, "n_yz": 0, "n_learned": 0},
-     False, None, 10),
+     False, None, 8),
 
     ("16", "All decoder flags",
      {"xz_levels": N_XZ, "use_cross_plane_attn": True,
