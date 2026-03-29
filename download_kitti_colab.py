@@ -345,6 +345,139 @@ def download_eval_drive(date_dir, drive_tag, out_dir):
     print(f"\n  {drive_tag}: {fetched}/{len(img_entries)} images downloaded")
 
 
+def download_eval_velodyne(date_dir, drive_tag, out_dir, needed_frames):
+    """Download only the velodyne .bin files needed for GT depth export.
+
+    needed_frames: set of int frame indices required from this drive.
+    Each .bin file is ~1-2 MB so the total for 652 test frames is ~1 GB.
+    """
+    url       = _zip_url(date_dir, drive_tag)
+    drive_out = os.path.join(out_dir, date_dir, drive_tag)
+    velo_dir  = os.path.join(drive_out, 'velodyne_points', 'data')
+
+    # Check which frames are already present
+    needed = {f for f in needed_frames
+              if not os.path.exists(os.path.join(velo_dir, f"{f:010d}.bin"))}
+    if not needed:
+        return  # all present already
+
+    print(f"  {drive_tag}: fetching velodyne CD ...", end=' ', flush=True)
+    try:
+        cd, zip_total = _fetch_cd(url)
+    except Exception as e:
+        print(f"FAILED ({e})")
+        return
+
+    velo_entries = {
+        k: v for k, v in cd.items()
+        if '/velodyne_points/' in k and k.endswith('.bin')
+    }
+    print(f"{len(velo_entries)} velodyne entries in ZIP")
+
+    os.makedirs(velo_dir, exist_ok=True)
+    fetched = 0
+    for frame_idx in sorted(needed):
+        fname_key = None
+        for k in velo_entries:
+            if f"{frame_idx:010d}.bin" in k:
+                fname_key = k
+                break
+        if fname_key is None:
+            print(f"\n    WARNING: frame {frame_idx:010d} not found in ZIP")
+            continue
+
+        local_off, comp_size = velo_entries[fname_key]
+        dest = os.path.join(velo_dir, f"{frame_idx:010d}.bin")
+
+        end_byte = local_off + comp_size + 64
+        raw = _http_get(url, (local_off, min(end_byte, zip_total - 1)))
+
+        # velodyne .bin: no PNG header, just strip the local file header
+        if raw[:4] == b'PK\x03\x04':
+            fname_len, extra_len = struct.unpack_from('<HH', raw, 26)
+            hdr = 30 + fname_len + extra_len
+            bin_data = raw[hdr:hdr + comp_size]
+        else:
+            bin_data = raw[:comp_size]
+
+        with open(dest, 'wb') as f:
+            f.write(bin_data)
+        fetched += 1
+        _progress(fetched, len(needed), f"  {drive_tag} velo: ")
+
+    print(f"\n  {drive_tag}: {fetched}/{len(needed)} velodyne files downloaded")
+
+
+def build_gt_depths(out_dir):
+    """Download velodyne for the 652 test frames and build gt_depths.npz.
+
+    Uses eigen_benchmark/test_files.txt directly so the resulting .npz
+    lines up exactly with the indices expected by evaluate_depth_HR.py.
+    """
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from kitti_utils import generate_depth_map
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    out_path   = os.path.join(script_dir, 'splits', 'eigen_benchmark', 'gt_depths.npz')
+
+    if os.path.exists(out_path):
+        print("  gt_depths.npz already exists, skipping export")
+        return
+
+    test_file = os.path.join(script_dir, 'splits', 'eigen_benchmark', 'test_files.txt')
+    with open(test_file) as f:
+        lines = [l.strip() for l in f if l.strip()]
+
+    # Group frame indices by drive for efficient velodyne download
+    from collections import defaultdict
+    drive_frames = defaultdict(set)
+    for line in lines:
+        parts  = line.split()
+        folder = parts[0]                        # e.g. 2011_09_26/2011_09_26_drive_0002_sync
+        drive  = folder.split('/')[-1]
+        drive_frames[drive].add(int(parts[1]))
+
+    # Download velodyne for each test drive
+    print("\n=== Velodyne point clouds for GT depth export (~1 GB) ===")
+    drive_map = {tag: (d, tag) for d, tag in EVAL_DRIVES}
+    for drive_tag, frames in drive_frames.items():
+        if drive_tag in drive_map:
+            date_dir, _ = drive_map[drive_tag]
+            download_eval_velodyne(date_dir, drive_tag, out_dir, frames)
+        else:
+            print(f"  WARNING: {drive_tag} not in EVAL_DRIVES list")
+
+    # Build gt_depths array in the same order as test_files.txt
+    print("\n  Building gt_depths.npz ...")
+    import skimage.transform
+    gt_depths = []
+    errors    = 0
+    for line in lines:
+        parts      = line.split()
+        folder     = parts[0]
+        frame_id   = int(parts[1])
+        date_str   = folder.split('/')[0]         # e.g. 2011_09_26
+        calib_dir  = os.path.join(out_dir, date_str)
+        velo_path  = os.path.join(out_dir, folder,
+                                  'velodyne_points', 'data',
+                                  f'{frame_id:010d}.bin')
+        if not os.path.exists(velo_path):
+            print(f"  MISSING: {velo_path}")
+            gt_depths.append(np.zeros((375, 1242), dtype=np.float32))
+            errors += 1
+            continue
+
+        gt_depth = generate_depth_map(calib_dir, velo_path, cam=2, vel_depth=True)
+        gt_depth = skimage.transform.resize(
+            gt_depth, (375, 1242), order=0, preserve_range=True, mode='constant')
+        gt_depths.append(gt_depth.astype(np.float32))
+
+    np.savez_compressed(out_path, data=np.array(gt_depths, dtype=object))
+    print(f"  Saved {len(gt_depths)} depth maps to splits/eigen_benchmark/gt_depths.npz"
+          + (f" ({errors} missing)" if errors else ""))
+
+
 # ── Mini split generator ──────────────────────────────────────────────────────
 
 def write_mini_split(out_dir, train_drives_downloaded):
@@ -428,10 +561,14 @@ def main():
               f"({sum(r[3] for r in downloaded_train):.1f} GB)")
         write_mini_split(out, downloaded_train)
 
-    # ── Evaluation data ───────────────────────────────────────────────────────
-    print("\n=== Evaluation drives (range-request, ~1 GB total) ===")
+    # ── Evaluation data (images) ──────────────────────────────────────────────
+    print("\n=== Evaluation drives — images (range-request, ~1 GB) ===")
     for date_dir, drive_tag in EVAL_DRIVES:
         download_eval_drive(date_dir, drive_tag, out)
+
+    # ── GT depths (velodyne for test frames → gt_depths.npz) ─────────────────
+    print("\n=== GT depths for evaluation ===")
+    build_gt_depths(out)
 
     print("\n=== Done ===")
     print(f"Data at: {out}")
