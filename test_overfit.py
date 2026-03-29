@@ -214,7 +214,7 @@ def lr_consistency_loss(disp_l, disp_r):
 def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
                 sem_cfg=None, lr_consist=False,
                 anneal_n=None, disp_tol=8.0, lr_override=None,
-                imgs=None):
+                imgs=None, steps_override=None):
     """
     dec_kw     : kwargs forwarded to make_decoder (xz_levels handled inside)
     extra_fn   : fn(out, img_l, img_r) -> scalar extra-loss tensor, or None
@@ -250,8 +250,9 @@ def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
     real_imgs = (imgs is not None)
 
     ph0 = ph_end = last_disp = None
+    n_steps = steps_override if steps_override is not None else args.steps
 
-    for step in range(args.steps):
+    for step in range(n_steps):
         opt.zero_grad()
 
         feats_l = enc(img_l)
@@ -491,21 +492,27 @@ def _run_one(sid, sname, dec_kw, extra_fn, use_grid, sem_cfg,
         # Real images have rougher loss landscapes than the smooth synthetic
         # pair — lr=1e-3 causes overshooting on complex architectures.
         # Cap KITTI lr at 2e-4 unless a lower override is already requested.
+        # LR consistency couples two decoders through a shared encoder, so
+        # the joint optimization converges slower on real images — use 2x steps.
         KITTI_LR_CAP = 2e-4
-        eff_lr_ov = lr_ov
+        eff_lr_ov    = lr_ov
+        steps_ov     = None
         if imgs is not None:
-            base_lr = lr_ov if lr_ov is not None else args.lr
+            base_lr  = lr_ov if lr_ov is not None else args.lr
             eff_lr_ov = min(base_lr, KITTI_LR_CAP)
+            if lr_c:
+                steps_ov = args.steps * 2
         passed, ratio, derr, real = run_overfit(
             sname, dec_kw,
-            extra_fn    = extra_fn,
-            use_grid    = use_grid,
-            sem_cfg     = sem_cfg,
-            lr_consist  = lr_c,
-            anneal_n    = anneal_n,
-            disp_tol    = tol,
-            lr_override = eff_lr_ov,
-            imgs        = imgs,
+            extra_fn       = extra_fn,
+            use_grid       = use_grid,
+            sem_cfg        = sem_cfg,
+            lr_consist     = lr_c,
+            anneal_n       = anneal_n,
+            disp_tol       = tol,
+            lr_override    = eff_lr_ov,
+            imgs           = imgs,
+            steps_override = steps_ov,
         )
         status = "PASS" if passed else "FAIL"
         if real:
