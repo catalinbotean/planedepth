@@ -40,7 +40,9 @@ def make_decoder(**kw):
     return DepthDecoder(**cfg).to(DEVICE)
 
 def make_feats():
-    feats, h, w = [], H, W
+    # The decoder upsamples once more at i=0 (no skip), so features must start
+    # at (H//2, W//2) for the final decoder output to land at (H, W).
+    feats, h, w = [], H // 2, W // 2
     for ch in ENC_CHS:
         feats.append(torch.randn(B, ch, h, w, device=DEVICE))
         h, w = max(h // 2, 1), max(w // 2, 1)
