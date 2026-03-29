@@ -488,6 +488,14 @@ def _run_one(sid, sname, dec_kw, extra_fn, use_grid, sem_cfg,
     if args.verbose:
         print()
     try:
+        # Real images have rougher loss landscapes than the smooth synthetic
+        # pair — lr=1e-3 causes overshooting on complex architectures.
+        # Cap KITTI lr at 2e-4 unless a lower override is already requested.
+        KITTI_LR_CAP = 2e-4
+        eff_lr_ov = lr_ov
+        if imgs is not None:
+            base_lr = lr_ov if lr_ov is not None else args.lr
+            eff_lr_ov = min(base_lr, KITTI_LR_CAP)
         passed, ratio, derr, real = run_overfit(
             sname, dec_kw,
             extra_fn    = extra_fn,
@@ -496,7 +504,7 @@ def _run_one(sid, sname, dec_kw, extra_fn, use_grid, sem_cfg,
             lr_consist  = lr_c,
             anneal_n    = anneal_n,
             disp_tol    = tol,
-            lr_override = lr_ov,
+            lr_override = eff_lr_ov,
             imgs        = imgs,
         )
         status = "PASS" if passed else "FAIL"
