@@ -61,7 +61,7 @@ class MonoDataset(data.Dataset):
         self.filenames = filenames
         self.height = height
         self.width = width
-        self.interp = Image.ANTIALIAS
+        self.interp = Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.ANTIALIAS
 
         self.novel_frame_ids = novel_frame_ids
 
