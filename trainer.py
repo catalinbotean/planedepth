@@ -48,10 +48,20 @@ class Trainer:
         self.opt = options
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
 
-        dist.init_process_group(backend='nccl')
+        # When launched via `torchrun` the env vars are already set.
+        # For single-GPU / Colab usage (plain `python train.py`) set them here.
+        if 'RANK' not in os.environ:
+            os.environ.setdefault('RANK',        '0')
+            os.environ.setdefault('LOCAL_RANK',  '0')
+            os.environ.setdefault('WORLD_SIZE',  '1')
+            os.environ.setdefault('MASTER_ADDR', 'localhost')
+            os.environ.setdefault('MASTER_PORT', '12355')
+        backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+        dist.init_process_group(backend=backend)
         self.local_rank = int(os.environ['LOCAL_RANK'])
-        self.opt.batch_size = self.opt.batch_size // torch.cuda.device_count()
-        torch.cuda.set_device(self.local_rank)
+        self.opt.batch_size = self.opt.batch_size // max(torch.cuda.device_count(), 1)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.local_rank)
         
         init_seeds(1+self.local_rank)
 
