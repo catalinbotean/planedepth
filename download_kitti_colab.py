@@ -515,17 +515,20 @@ def write_mini_split(out_dir, train_drives_downloaded):
 def main():
     parser = argparse.ArgumentParser(
         description="Download KITTI stereo data efficiently for Colab / limited disk")
-    parser.add_argument("--out",         default="./kitti_data",
+    parser.add_argument("--out",           default="./kitti_data",
                         help="output directory (default: ./kitti_data)")
-    parser.add_argument("--test-only",   action="store_true",
+    parser.add_argument("--test-only",     action="store_true",
                         help="only download evaluation drives, skip training data")
-    parser.add_argument("--skip-large",  action="store_true", default=True,
+    parser.add_argument("--velodyne-only", action="store_true",
+                        help="only download velodyne for test frames and build "
+                             "gt_depths.npz; skip all image downloads")
+    parser.add_argument("--skip-large",    action="store_true", default=True,
                         help="skip the 2 large training drives "
                              "(0028_sync @ 20 GB and 10_03/0034 @ 12 GB) "
                              "[default: True]")
     parser.add_argument("--include-large", action="store_true",
                         help="include the large drives (overrides --skip-large)")
-    parser.add_argument("--max-gb",      type=float, default=50.0,
+    parser.add_argument("--max-gb",        type=float, default=50.0,
                         help="stop downloading training ZIPs after this many GB "
                              "(default: 50)")
     args = parser.parse_args()
@@ -533,6 +536,13 @@ def main():
     skip_large = args.skip_large and not args.include_large
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=True)
+
+    # ── Velodyne-only shortcut ────────────────────────────────────────────────
+    if args.velodyne_only:
+        print("=== GT depths only (velodyne + gt_depths.npz) ===")
+        build_gt_depths(out)
+        print("\n=== Done ===")
+        return
 
     # ── Calibration ──────────────────────────────────────────────────────────
     print("=== Calibration files ===")
