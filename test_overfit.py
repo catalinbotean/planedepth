@@ -51,10 +51,23 @@ DISP_MAX    = 48                   # pixels  (near depth — ~ 4 m at KITTI base
 GT_DISP     = 20.0                 # constant disparity for the synthetic scene
 
 # ── Build a synthetic stereo pair ─────────────────────────────────────────────
-# Left image: random texture fixed for the whole experiment.
-# Right image: left shifted LEFT by GT_DISP pixels (standard stereo convention).
-torch.manual_seed(0)
-img_left = torch.rand(B, 3, H, W, device=device)   # [0, 1]
+# Left image: structured pattern so photometric loss has a genuine gradient
+# w.r.t. horizontal shift.  Pure random noise produces near-uniform SSIM for
+# any shift, giving essentially zero gradient for disparity.
+#
+# We use a horizontal sinusoidal ramp (3 channels, different phases) so that:
+#   - Every local patch has a clear brightness gradient in x
+#   - The SSIM/L1 residual grows monotonically as |predicted_disp - GT_DISP| grows
+#   - The gradient flows cleanly back through the warp to the decoder
+xs_norm = torch.linspace(0.0, 1.0, W, device=device)   # (W,)
+ys_norm = torch.linspace(0.0, 1.0, H, device=device)   # (H,)
+gy, gx  = torch.meshgrid(ys_norm, xs_norm, indexing="ij")  # H, W
+
+freq = 4.0 * np.pi   # 2 full cycles across the image width
+phase = torch.tensor([0.0, 2*np.pi/3, 4*np.pi/3], device=device)  # 3 channels
+# (3, H, W)
+img_left_3hw = (0.5 + 0.5 * torch.sin(freq * gx.unsqueeze(0) + phase[:, None, None]))
+img_left = img_left_3hw.unsqueeze(0)   # B=1, 3, H, W
 
 # Shift: right[b, c, y, x] = left[b, c, y, x + GT_DISP]
 # Build a sampling grid for this shift.
@@ -132,7 +145,8 @@ def warp_right_to_left(img_r, disp_pixels):
                          padding_mode="border", align_corners=True)
 
 # ── Training loop ─────────────────────────────────────────────────────────────
-losses = []
+losses          = []
+disparity_trace = []
 print(f"\n{'Step':>6}  {'Loss':>10}  {'MeanDisp':>10}  {'GTDisp':>10}")
 print("-" * 44)
 
@@ -151,25 +165,35 @@ for step in range(args.steps):
     optim.step()
 
     losses.append(loss.item())
+    disparity_trace.append(disp.detach().mean().item())
 
     if step % 10 == 0 or args.verbose:
-        mean_disp = disp.detach().mean().item()
-        print(f"{step:>6}  {loss.item():>10.4f}  {mean_disp:>10.2f}  {GT_DISP:>10.1f}")
+        print(f"{step:>6}  {loss.item():>10.4f}  {disparity_trace[-1]:>10.2f}  {GT_DISP:>10.1f}")
 
 # ── Pass / fail ───────────────────────────────────────────────────────────────
+# Criterion 1: loss drops by at least 50 % (strong signal needed)
+# Criterion 2: final mean disparity is within 5 px of GT (model converges)
 print()
-loss_0    = losses[0]
-loss_end  = losses[-1]
-ratio     = loss_end / loss_0
-threshold = 0.70
+loss_0       = losses[0]
+loss_end     = losses[-1]
+ratio        = loss_end / loss_0
+final_disp   = disparity_trace[-1]
+disp_err     = abs(final_disp - GT_DISP)
 
 print(f"Loss at step 0   : {loss_0:.4f}")
 print(f"Loss at step {args.steps-1:<3}: {loss_end:.4f}")
-print(f"Ratio (end/start): {ratio:.3f}  (pass if < {threshold})")
+print(f"Ratio (end/start): {ratio:.3f}  (pass if < 0.50)")
+print(f"Final mean disp  : {final_disp:.2f}  (GT={GT_DISP}, pass if |err| < 5 px)")
 
-if ratio < threshold:
-    print("\n✓  PASS — loss decreased by more than 30%")
+ok_loss = ratio < 0.50
+ok_disp = disp_err < 5.0
+
+if ok_loss and ok_disp:
+    print("\n✓  PASS — loss halved AND disparity converged to GT")
     sys.exit(0)
 else:
-    print("\n✗  FAIL — loss did not decrease enough")
+    if not ok_loss:
+        print(f"\n✗  FAIL — loss ratio {ratio:.3f} >= 0.50")
+    if not ok_disp:
+        print(f"\n✗  FAIL — disparity error {disp_err:.2f} px >= 5 px")
     sys.exit(1)
