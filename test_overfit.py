@@ -175,8 +175,8 @@ def surface_normal_loss(depth, img):
     wu = torch.exp(-(ic[:,:,:,1:]-ic[:,:,:,:-1]).abs().mean(1,True))   # B,1,H-2,W-3
     wv = torch.exp(-(ic[:,:,1:,:]-ic[:,:,:-1,:]).abs().mean(1,True))   # B,1,H-3,W-2
     # second differences penalise curvature (non-planar depth)
-    loss_u = (tu[:,:,:,:-1] - tu[:,:,:,1:]).abs() * wu[:,:,:,:-1]      # B,1,H-2,W-3
-    loss_v = (tv[:,:,:-1,:] - tv[:,:,1:,:]).abs() * wv[:,:,:-1,:]      # B,1,H-3,W-2
+    loss_u = (tu[:,:,:,:-1] - tu[:,:,:,1:]).abs() * wu        # both (B,1,H-2,W-3)
+    loss_v = (tv[:,:,:-1,:] - tv[:,:,1:,:]).abs() * wv        # both (B,1,H-3,W-2)
     return loss_u.mean() + loss_v.mean()
 
 
@@ -198,7 +198,7 @@ def lr_consistency_loss(disp_l, disp_r):
 
 def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
                 sem_cfg=None, lr_consist=False,
-                anneal_n=None, disp_tol=8.0):
+                anneal_n=None, disp_tol=8.0, lr_override=None):
     """
     dec_kw     : kwargs forwarded to make_decoder (xz_levels handled inside)
     extra_fn   : fn(out, img_l, img_r) -> scalar extra-loss tensor, or None
@@ -221,7 +221,7 @@ def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
         gate = SemanticPlaneGate(num_classes=N_SEM, **sem_cfg).to(device)
         params += list(gate.parameters())
 
-    opt  = torch.optim.Adam(params, lr=args.lr)
+    opt  = torch.optim.Adam(params, lr=lr_override if lr_override else args.lr)
     grid = GRID if use_grid else None
 
     ph0 = ph_end = last_disp = None
@@ -247,7 +247,7 @@ def run_overfit(name, dec_kw, extra_fn=None, use_grid=False,
         if lr_consist:
             feats_r = enc(img_right)
             out_r   = dec(feats_r, input_grids=grid)
-            total   = total + 0.1 * lr_consistency_loss(
+            total   = total + 0.01 * lr_consistency_loss(
                           out_l["disp"], out_r["disp"])
 
         total.backward()
@@ -302,82 +302,85 @@ def extra_all(out, img_l, img_r):
 
 
 # ── Scenario table ────────────────────────────────────────────────────────────
-# Each row: (id, name, dec_kw, extra_fn, use_grid, sem_cfg, lr_consist, anneal_n, disp_tol)
+# Each row: (id, name, dec_kw, extra_fn, use_grid, sem_cfg, lr_consist, anneal_n, disp_tol, lr_override)
+# lr_override=None → use args.lr; set to a float to use a different lr for that scenario only.
 
 SCENARIOS = [
     ("00", "Baseline",
-     {}, None, False, None, False, None, 8),
+     {}, None, False, None, False, None, 8, None),
 
     ("01", "Cross-plane attention",
      {"xz_levels": N_XZ, "use_cross_plane_attn": True},
-     None, True, None, False, None, 8),
+     None, True, None, False, None, 8, None),
 
     ("02", "Adaptive plane range",
      {"adaptive_plane_range": True},
-     None, False, None, False, None, 8),
+     None, False, None, False, None, 8, None),
 
     ("03", "Pixelwise plane residual",
      {"pixelwise_plane_residual": True},
-     None, False, None, False, None, 8),
+     None, False, None, False, None, 8, None),
 
     ("04", "Learned plane families",
      {"num_learned_families": 2, "learned_planes_per_family": 5},
-     None, True, None, False, None, 8),   # learned families access input_grids → need grid
+     None, True, None, False, None, 8, None),   # needs grid (accesses input_grids[:,0])
 
+    # Multi-scale: aux heads at coarser scales use noisy features with random init;
+    # use a 5× lower lr to prevent them destabilising the fine-scale head early on.
     ("05", "Multi-scale logit aggregation",
      {"use_multiscale_logits": True},
-     None, False, None, False, None, 8),
+     None, False, None, False, None, 8, 2e-4),
 
     ("06", "Plane annealing (start low)",
      {},
-     None, False, None, False, 4, 99),  # anneal_n=4: only 4 far-depth planes active,
-                                        # so mean disp won't be 20 — only check ph_ratio
+     None, False, None, False, 16, 8, None),  # anneal_n=16: planes k=0..15 (48→~10px);
+                                              # GT=20 is at k≈9, well within active set
 
     ("07", "Semantic gate (paper branch)",
      {},
      None, False, {"n_xy": N_XY, "n_xz": 0, "n_yz": 0, "n_learned": 0},
-     False, None, 8),
+     False, None, 8, None),
 
     ("08", "Entropy regularisation",
-     {}, extra_entropy, False, None, False, None, 8),
+     {}, extra_entropy, False, None, False, None, 8, None),
 
     ("09", "Focal photometric loss",
-     {}, extra_focal, False, None, False, None, 8),
+     {}, extra_focal, False, None, False, None, 8, None),
 
     ("10", "Confidence-weighted smoothness",
-     {}, extra_conf_smooth, False, None, False, None, 8),
+     {}, extra_conf_smooth, False, None, False, None, 8, None),
 
     ("11", "LR consistency loss",
-     {}, None, False, None, True, None, 8),
+     {}, None, False, None, True, None, 8, None),
 
     ("12", "Surface normal smoothness",
-     {}, extra_normal, False, None, False, None, 8),
+     {}, extra_normal, False, None, False, None, 8, None),
 
     # ── Combinations ─────────────────────────────────────────────────────────
 
     ("13", "Cross-attn + Learned families  [fixed bug]",
      {"xz_levels": N_XZ, "use_cross_plane_attn": True,
       "num_learned_families": 2, "learned_planes_per_family": 5},
-     None, True, None, False, None, 8),
+     None, True, None, False, None, 8, None),
 
     ("14", "Multi-scale + Adaptive range",
      {"use_multiscale_logits": True, "adaptive_plane_range": True},
-     None, False, None, False, None, 8),
+     None, False, None, False, None, 8, 2e-4),  # same lr fix as scenario 05
 
     ("15", "Semantic gate + Entropy",
      {}, extra_entropy,
      False, {"n_xy": N_XY, "n_xz": 0, "n_yz": 0, "n_learned": 0},
-     False, None, 8),
+     False, None, 8, None),
 
     ("16", "All decoder flags",
      {"xz_levels": N_XZ, "use_cross_plane_attn": True,
       "adaptive_plane_range": True, "pixelwise_plane_residual": True,
       "num_learned_families": 2, "learned_planes_per_family": 5,
       "use_multiscale_logits": True},
-     None, True, None, False, None, 10),
+     None, True, None, False, None, 10, 2e-4),  # lr fix for multiscale component
 
     ("17", "All loss augmentations",
-     {}, extra_all, False, None, False, None, 10),
+     {}, extra_all, False, None, False, None, 10, None),
 
     ("18", "Kitchen sink (everything)",
      {"xz_levels": N_XZ, "use_cross_plane_attn": True,
@@ -386,7 +389,7 @@ SCENARIOS = [
       "use_multiscale_logits": True},
      extra_all, True,
      {"n_xy": N_XY, "n_xz": N_XZ, "n_yz": 0, "n_learned": 10},
-     True, 4, 12),
+     True, None, 12, 2e-4),  # lr fix for multiscale
 ]
 
 # ── Run all (or selected) scenarios ──────────────────────────────────────────
@@ -394,7 +397,7 @@ run_ids = set(args.only) if args.only else None
 results = []
 
 for row in SCENARIOS:
-    sid, sname, dec_kw, extra_fn, use_grid, sem_cfg, lr_c, anneal_n, tol = row
+    sid, sname, dec_kw, extra_fn, use_grid, sem_cfg, lr_c, anneal_n, tol, lr_ov = row
 
     if run_ids and sid not in run_ids:
         continue
@@ -407,12 +410,13 @@ for row in SCENARIOS:
     try:
         passed, ratio, derr = run_overfit(
             sname, dec_kw,
-            extra_fn   = extra_fn,
-            use_grid   = use_grid,
-            sem_cfg    = sem_cfg,
-            lr_consist = lr_c,
-            anneal_n   = anneal_n,
-            disp_tol   = tol,
+            extra_fn    = extra_fn,
+            use_grid    = use_grid,
+            sem_cfg     = sem_cfg,
+            lr_consist  = lr_c,
+            anneal_n    = anneal_n,
+            disp_tol    = tol,
+            lr_override = lr_ov,
         )
         status = "PASS" if passed else "FAIL"
         print(f"  → {status}  ph_ratio={ratio:.3f}  "
