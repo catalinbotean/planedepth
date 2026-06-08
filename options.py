@@ -211,6 +211,29 @@ class MonodepthOptions:
                                  help="If set, weight the self-distillation loss by the teacher's "
                                       "mixture-model confidence (low-variance teacher predictions "
                                       "receive higher weight). Requires --use_mixture_loss.")
+        self.parser.add_argument("--semantic_distill_weight",
+                                 type=float,
+                                 default=0.,
+                                 help="If > 0, modulate the self-distillation loss by the "
+                                      "agreement between the frozen segmenter's expected plane "
+                                      "family (road->XZ, wall->YZ, sky->XY) and the model's own "
+                                      "per-pixel family assignment. Pixels where semantics and "
+                                      "geometry agree are trusted more as distillation targets; "
+                                      "ambiguous pixels are down-weighted. Requires "
+                                      "--use_semantic_gate and --self_distillation > 0.")
+        self.parser.add_argument("--semantic_edge_smoothness",
+                                 action="store_true",
+                                 help="If set, relax disparity smoothness at semantic class "
+                                      "boundaries (from the frozen segmenter) in addition to RGB "
+                                      "image edges. Suppresses texture-induced false edges and "
+                                      "aligns depth discontinuities with object boundaries. "
+                                      "Requires --use_semantic_gate.")
+        self.parser.add_argument("--gamma_smooth_semantic",
+                                 type=float,
+                                 default=2.,
+                                 help="Edge sensitivity for the semantic-boundary term of "
+                                      "--semantic_edge_smoothness (analogous to --gamma_smooth "
+                                      "for RGB edges).")
         self.parser.add_argument("--use_semantic_gate",
                                  action="store_true",
                                  help="If set, run a frozen pretrained SegFormer-B0 "

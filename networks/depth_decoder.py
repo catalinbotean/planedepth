@@ -115,6 +115,23 @@ class SemanticPlaneGate(nn.Module):
         # Opens gradually during training so the base model is preserved early
         self.gate_scale = nn.Parameter(torch.zeros(1))
 
+        # Fixed (non-learnable) class→family prior, kept separately from the
+        # learnable `affinity` so it can serve as a *stable* supervisory signal
+        # for semantic-consistency distillation / smoothness (see
+        # semantic_family_probs).  For non-Cityscapes models it is all-zeros,
+        # which makes semantic_family_probs return a uniform distribution
+        # (i.e. the consistency signal gracefully no-ops).
+        if num_classes == 19:
+            rows = ([0] +
+                    ([1] if n_xz > 0 else []) +
+                    ([2] if n_yz > 0 else []) +
+                    ([3] if n_learned > 0 else []))
+            fixed_prior = torch.tensor([self._CITYSCAPES_PRIOR[r] for r in rows],
+                                       dtype=torch.float32)
+        else:
+            fixed_prior = torch.zeros(self.n_families, num_classes)
+        self.register_buffer("family_prior", fixed_prior)  # (n_families, C)
+
     def forward(self, semantic_logits):
         """
         semantic_logits : (B, C, H_s, W_s) raw logits from frozen segmenter
@@ -144,6 +161,22 @@ class SemanticPlaneGate(nn.Module):
             parts.append(family_scores[:, fam_idx:fam_idx + 1].expand(-1, self.n_learned, -1, -1))
 
         return torch.cat(parts, dim=1)  # B, N_total, H_s, W_s
+
+    def semantic_family_probs(self, semantic_logits):
+        """Per-pixel *expected* plane-family distribution from semantics alone.
+
+        Unlike `forward` (which uses the learnable affinity to produce a logit
+        bias), this uses the FIXED Cityscapes prior so the result is a stable
+        target/weight that does not drift as `affinity` is trained.  It answers
+        "given the semantic class here, which plane family *should* explain this
+        pixel?" — road/terrain → XZ, building/wall → YZ, sky/vehicles → XY.
+
+        semantic_logits : (B, C, H_s, W_s) raw logits from the frozen segmenter
+        Returns         : (B, n_families, H_s, W_s) softmax over the family dim
+        """
+        class_probs = F.softmax(semantic_logits, dim=1)            # B, C, H, W
+        fam = torch.einsum("fc,bchw->bfhw", self.family_prior, class_probs)
+        return F.softmax(fam, dim=1)                               # B, F, H, W
 
 
 class CrossPlaneAttention(nn.Module):

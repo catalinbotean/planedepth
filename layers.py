@@ -255,6 +255,37 @@ def get_smooth_loss_disp(disp, img, gamma=1):
 
     return grad_disp_x.mean() + grad_disp_y.mean()
 
+
+def get_smooth_loss_disp_semantic(disp, img, sem_prob, gamma=2, gamma_sem=2):
+    """Edge-aware disparity smoothness using BOTH RGB and semantic boundaries.
+
+    The standard smoothness relaxes the penalty where the RGB image gradient is
+    large.  But RGB gradients fire on texture (road markings, shadows, foliage)
+    that are *not* depth discontinuities, while real depth boundaries
+    (road↔car, building↔sky) coincide with *semantic* class boundaries.  Here
+    the penalty is relaxed where either the image OR the semantic class map has
+    a strong gradient, so smoothness is enforced inside semantically uniform
+    regions and released exactly at object boundaries.
+
+    disp     : (B, 1, H, W) predicted disparity
+    img      : (B, 3, H, W) reference colour image
+    sem_prob : (B, C, H, W) per-pixel semantic class probabilities (frozen seg)
+    """
+    grad_disp_x = torch.abs(disp[:, :, :, :-1] - disp[:, :, :, 1:])
+    grad_disp_y = torch.abs(disp[:, :, :-1, :] - disp[:, :, 1:, :])
+
+    grad_img_x = torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]), 1, keepdim=True)
+    grad_img_y = torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :]), 1, keepdim=True)
+
+    grad_sem_x = torch.mean(torch.abs(sem_prob[:, :, :, :-1] - sem_prob[:, :, :, 1:]), 1, keepdim=True)
+    grad_sem_y = torch.mean(torch.abs(sem_prob[:, :, :-1, :] - sem_prob[:, :, 1:, :]), 1, keepdim=True)
+
+    grad_disp_x = grad_disp_x * torch.exp(-gamma*grad_img_x - gamma_sem*grad_sem_x)
+    grad_disp_y = grad_disp_y * torch.exp(-gamma*grad_img_y - gamma_sem*grad_sem_y)
+
+    return grad_disp_x.mean() + grad_disp_y.mean()
+
+
 def get_smooth_loss_probability(probability, disp_layered, img, gamma=1):
     """Computes the smoothness loss for a disparity image
     The color image is used for edge-aware smoothness

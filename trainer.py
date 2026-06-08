@@ -399,9 +399,11 @@ class Trainer:
         # maybe we need use the same name for different model in self.models
         if self.opt.net_type == "ResNet":
             features = self.models["encoder"](inputs[("color_aug", "l")])
-            sem_bias = self._get_semantic_bias(inputs[("color_aug", "l")])
+            sem_bias, sem_logits = self._get_semantic_bias(inputs[("color_aug", "l")])
             outputs = self.models["depth"](features, inputs["grid"],
                                            sem_bias=sem_bias)
+            if sem_logits is not None:
+                outputs["semantic_logits"] = sem_logits
         elif self.opt.net_type == "PladeNet":
             outputs = self.models["plade"](inputs[("color_aug", "l")], inputs["grid"])
         elif self.opt.net_type == "FalNet":
@@ -562,9 +564,11 @@ class Trainer:
                 # maybe we need use the same name for different model in self.models
                 if self.opt.net_type == "ResNet":
                     features = self.models["encoder"](inputs[("color_aug", "l")])
-                    sem_bias = self._get_semantic_bias(inputs[("color_aug", "l")])
+                    sem_bias, sem_logits = self._get_semantic_bias(inputs[("color_aug", "l")])
                     outputs = self.models["depth"](features, inputs["grid"],
                                                    sem_bias=sem_bias)
+                    if sem_logits is not None:
+                        outputs["semantic_logits"] = sem_logits
                 elif self.opt.net_type == "PladeNet":
                     outputs = self.models["plade"](inputs[("color_aug", "l")], inputs["grid"])
                 elif self.opt.net_type == "FalNet":
@@ -764,12 +768,59 @@ class Trainer:
         Returns (B, N_planes, H_s, W_s) bias tensor, or None when disabled.
         """
         if self.semantic_backbone is None:
-            return None
+            return None, None
         # SegFormerBackbone.forward is already decorated with @torch.no_grad()
         # and handles its own ImageNet normalisation.
         sem_logits = self.semantic_backbone(img)  # B, 19, H//4, W//4
         gate = self.models["semantic_gate"]
-        return gate(sem_logits)   # B, N_planes, H_s, W_s  (upsampled in decoder)
+        sem_bias = gate(sem_logits)   # B, N_planes, H_s, W_s (upsampled in decoder)
+        return sem_bias, sem_logits
+
+    def _aggregate_family_probs(self, probability):
+        """Sum the mixture probability over the planes of each family.
+
+        probability : (B, N_total, H, W) per-plane assignment probabilities
+        Returns      : (B, n_families, H, W) with families ordered
+                       [XY, (XZ), (YZ), (learned)] to match SemanticPlaneGate.
+        """
+        n_xy = self.opt.disp_levels
+        n_xz = self.opt.xz_levels
+        n_yz = self.opt.yz_levels
+        parts = [probability[:, :n_xy].sum(1, keepdim=True)]
+        i = n_xy
+        if n_xz > 0:
+            parts.append(probability[:, i:i + n_xz].sum(1, keepdim=True)); i += n_xz
+        if n_yz > 0:
+            parts.append(probability[:, i:i + n_yz].sum(1, keepdim=True)); i += n_yz
+        if i < probability.shape[1]:                       # learned family remainder
+            parts.append(probability[:, i:].sum(1, keepdim=True))
+        return torch.cat(parts, dim=1)
+
+    def _semantic_consistency_map(self, outputs, out_shape):
+        """Per-pixel agreement between semantic-expected and predicted family.
+
+        High where the segmenter's expected plane family (road->XZ, wall->YZ,
+        sky->XY) matches the family the model actually assigns -> those pixels
+        are geometrically + semantically consistent and make trustworthy
+        distillation targets.
+
+        Returns a (B, 1, H, W) map in [0, 1] aligned to ``out_shape``, or None
+        when the semantic backbone is disabled.
+        """
+        sem_logits = outputs.get("semantic_logits")
+        if sem_logits is None:
+            return None
+        gate = self.models["semantic_gate"].module
+        p_sem = gate.semantic_family_probs(sem_logits)          # B, F, h, w
+        p_pred = self._aggregate_family_probs(outputs["probability"])  # Bp, F, H, W
+
+        Bt = out_shape[0]
+        p_sem = p_sem[:Bt]
+        p_pred = p_pred[:Bt]
+        size = out_shape[-2:]
+        p_sem = F.interpolate(p_sem, size=size, mode="bilinear", align_corners=False)
+        p_pred = F.interpolate(p_pred, size=size, mode="bilinear", align_corners=False)
+        return (p_sem * p_pred).sum(1, keepdim=True)            # Bt, 1, H, W
 
     def compute_surface_normal_loss(self, outputs, inputs):
         """Image-edge-weighted surface normal smoothness loss.
@@ -1007,11 +1058,22 @@ class Trainer:
                 
             if self.opt.self_distillation > 0:
                 disp_loss = torch.abs(outputs["disp"] - outputs["disp_pp"])
+                weight = None
                 if self.opt.uncertainty_weighted_distillation and outputs.get("teacher_confidence") is not None:
-                    conf = outputs["teacher_confidence"]           # B, 1, H, W
+                    weight = outputs["teacher_confidence"]         # B, 1, H, W
+                if self.opt.semantic_distill_weight > 0:
+                    agree = self._semantic_consistency_map(outputs, disp_loss.shape)
+                    if agree is not None:
+                        # Centre the modulation on its mean so it re-weights
+                        # (emphasise agreeing pixels) instead of just scaling
+                        # the whole loss down.  Clamp to stay non-negative.
+                        w_sem = (1. + self.opt.semantic_distill_weight *
+                                 (agree - agree.mean())).clamp(min=0.)
+                        weight = w_sem if weight is None else weight * w_sem
+                if weight is not None:
                     # Normalise so the effective batch size is preserved
-                    conf = conf / (conf.mean() + 1e-8)
-                    disp_loss = (disp_loss * conf).mean()
+                    weight = weight / (weight.mean() + 1e-8)
+                    disp_loss = (disp_loss * weight).mean()
                 else:
                     disp_loss = disp_loss.mean()
                 losses["loss/disp_loss"] = disp_loss
@@ -1027,7 +1089,18 @@ class Trainer:
         # near uncertain pixels (boundaries, occlusions, sky).
         disp_crop = outputs["disp"][..., int(0.2 * W):]
         img_crop  = inputs[("color", "l")][..., int(0.2 * W):]
-        if "disp_var" in outputs and self.opt.use_confidence_smooth:
+        if self.opt.semantic_edge_smoothness and "semantic_logits" in outputs:
+            # Relax smoothness at semantic class boundaries (+ RGB edges),
+            # suppressing texture-induced false edges.
+            sem_prob = F.softmax(outputs["semantic_logits"], dim=1)
+            sem_crop = sem_prob[:disp_crop.shape[0]]
+            sem_crop = F.interpolate(sem_crop, size=disp_crop.shape[-2:],
+                                     mode="bilinear", align_corners=False)
+            smooth_loss = get_smooth_loss_disp_semantic(
+                disp_crop, img_crop, sem_crop,
+                gamma=self.opt.gamma_smooth,
+                gamma_sem=self.opt.gamma_smooth_semantic)
+        elif "disp_var" in outputs and self.opt.use_confidence_smooth:
             conf_crop = outputs["disp_var"][..., int(0.2 * W):]
             # disp_var = variance → invert for confidence
             conf_crop = 1.0 / (conf_crop + 1e-4)
@@ -1202,8 +1275,16 @@ class Trainer:
         print("loading model from folder {}".format(self.opt.load_weights_folder))
 
         for n in self.opt.models_to_load:
-            print("Loading {} weights...".format(n))
+            if n not in self.models:
+                print("  skip '{}' (not in current model set)".format(n))
+                continue
             path = os.path.join(self.opt.load_weights_folder, "{}.pth".format(n))
+            if not os.path.isfile(path):
+                # e.g. loading a baseline stage-1 that had no semantic_gate;
+                # leave the freshly-initialised module as-is rather than crash.
+                print("  skip '{}' (no checkpoint at {})".format(n, path))
+                continue
+            print("Loading {} weights...".format(n))
             model_dict = self.models[n].module.state_dict()
             pretrained_dict = torch.load(path, map_location=self.device)
             pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}

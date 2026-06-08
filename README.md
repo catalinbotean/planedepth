@@ -55,8 +55,14 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 OMP_NUM_THREADS=1 torchrun --nproc_per_node=4 train
 --height 384 \ # new
 --no_crop \ # new
 --load_weights_folder ./log/ResNet/exp1/last_models \ # new
---models_to_load depth encoder # new
+--models_to_load depth encoder semantic_gate # new (semantic_gate only if stage1 used --use_semantic_gate)
 ```
+> **Carrying the semantic gate forward:** if stage 1 was trained with
+> `--use_semantic_gate`, you **must** add `semantic_gate` to `--models_to_load`
+> *and* keep `--use_semantic_gate` set here, otherwise the learned gate is
+> re-initialised to zero and the semantic prior is silently dropped at exactly
+> the high-res stage where it helps most. Optionally enable
+> `--semantic_edge_smoothness` here (semantic-boundary-aware smoothness).
 
 To perform self-distillation after HRfinetune, update `train_ResNet.sh` as:
 ```shell
@@ -74,9 +80,15 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 OMP_NUM_THREADS=1 torchrun --nproc_per_node=4 train
 --height 384 \
 --no_crop \
 --load_weights_folder ./log/ResNet/exp1_HR/last_models \ # modified
---models_to_load depth encoder \
+--models_to_load depth encoder semantic_gate \ # add semantic_gate if using the gate
 --self_distillation 1. # new
 ```
+> **Semantic-guided self-distillation (optional, paper experiments):** with
+> `--use_semantic_gate` active, add `--semantic_distill_weight 1.0` to trust the
+> teacher's pseudo-labels more where the segmenter's expected plane family
+> (road→XZ, wall→YZ, sky→XY) agrees with the model's own family assignment, and
+> down-weight ambiguous pixels. Combine with
+> `--uncertainty_weighted_distillation` for confidence × semantic weighting.
 
 **Monocular training:**
 
