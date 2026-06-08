@@ -6,3 +6,5 @@ Pillow==9.4.0
 six==1.16.0
 scikit-image==0.18.3
 tensorboardX==2.6
+# required for --use_semantic_gate (frozen SegFormer-B0 Cityscapes backbone)
+transformers>=4.20.0

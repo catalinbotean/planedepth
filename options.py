@@ -213,19 +213,24 @@ class MonodepthOptions:
                                       "receive higher weight). Requires --use_mixture_loss.")
         self.parser.add_argument("--use_semantic_gate",
                                  action="store_true",
-                                 help="If set, run a frozen pretrained DeepLabV3-ResNet50 "
-                                      "segmenter on each input image and use the per-pixel "
-                                      "class probabilities to bias plane-family logits via "
-                                      "the learnable SemanticPlaneGate module: sky→XY, "
-                                      "road/terrain→XZ, building/wall→YZ. Requires "
-                                      "torchvision with pretrained weights available.")
+                                 help="If set, run a frozen pretrained SegFormer-B0 "
+                                      "(Cityscapes-19) segmenter on each input image and use "
+                                      "the per-pixel class probabilities to bias plane-family "
+                                      "logits via the learnable SemanticPlaneGate module: "
+                                      "sky→XY, road/terrain→XZ, building/wall→YZ. Requires "
+                                      "the `transformers` package (pip install transformers).")
+        self.parser.add_argument("--segformer_model",
+                                 type=str,
+                                 default="nvidia/segformer-b0-finetuned-cityscapes-512-1024",
+                                 help="HuggingFace model ID for the frozen SegFormer backbone "
+                                      "used by --use_semantic_gate. Must be a 19-class "
+                                      "Cityscapes model so the Cityscapes prior is activated.")
         self.parser.add_argument("--semantic_num_classes",
                                  type=int,
-                                 default=21,
+                                 default=19,
                                  help="Number of output classes from the semantic backbone "
-                                      "(21 for COCO/VOC DeepLabV3, 19 for Cityscapes). "
-                                      "When 19, SemanticPlaneGate is auto-initialised with "
-                                      "the hand-crafted Cityscapes prior.")
+                                      "(19 for Cityscapes SegFormer, which activates the "
+                                      "hand-crafted Cityscapes prior in SemanticPlaneGate).")
         self.parser.add_argument("--plane_anneal_start",
                                  type=int,
                                  default=49,

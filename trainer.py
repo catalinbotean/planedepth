@@ -107,12 +107,9 @@ class Trainer:
         # depth families (sky→XY, road→XZ, wall→YZ).
         self.semantic_backbone = None
         if self.opt.use_semantic_gate and self.opt.net_type == "ResNet":
-            seg = torchvision.models.segmentation.deeplabv3_resnet50(
-                pretrained=True)
-            seg.eval()
-            for p in seg.parameters():
-                p.requires_grad_(False)
-            self.semantic_backbone = seg.to(self.device)
+            self.semantic_backbone = networks.SegFormerBackbone(
+                model_id=self.opt.segformer_model
+            ).to(self.device)
 
             n_learned = (self.opt.num_learned_families *
                          self.opt.learned_planes_per_family)
@@ -123,11 +120,6 @@ class Trainer:
                 n_yz=self.opt.yz_levels,
                 n_learned=n_learned,
             )
-            # ImageNet normalisation constants (NCHW broadcastable)
-            self.sem_mean = torch.tensor(
-                [0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
-            self.sem_std  = torch.tensor(
-                [0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
 
         if len(self.opt.novel_frame_ids) > 0 and not self.opt.use_colmap:
             self.models["pose_encoder"] = networks.ResnetPoseEncoder(18, True, 2)
@@ -766,16 +758,16 @@ class Trainer:
         
 
     def _get_semantic_bias(self, img):
-        """Run frozen segmenter + SemanticPlaneGate → plane logit biases.
+        """Run frozen SegFormer + SemanticPlaneGate → plane logit biases.
 
         img : (B, 3, H, W) in [0, 1] range (may be 2B when flip_right=True)
         Returns (B, N_planes, H_s, W_s) bias tensor, or None when disabled.
         """
         if self.semantic_backbone is None:
             return None
-        with torch.no_grad():
-            img_norm = (img - self.sem_mean) / self.sem_std
-            sem_logits = self.semantic_backbone(img_norm)["out"]  # B, C, H_s, W_s
+        # SegFormerBackbone.forward is already decorated with @torch.no_grad()
+        # and handles its own ImageNet normalisation.
+        sem_logits = self.semantic_backbone(img)  # B, 19, H//4, W//4
         gate = self.models["semantic_gate"]
         return gate(sem_logits)   # B, N_planes, H_s, W_s  (upsampled in decoder)
 
