@@ -58,19 +58,23 @@ class SegFormerBackbone(nn.Module):
 
         try:
             model = SegformerForSemanticSegmentation.from_pretrained(model_id)
-        except OSError as e:
-            raise OSError(
-                f"Cannot load SegFormer from '{model_id}'.\n\n"
-                "If this machine has no internet access, pre-download the model "
-                "on a connected machine:\n\n"
-                "  python -c \"\n"
-                "  from huggingface_hub import snapshot_download\n"
-                "  snapshot_download('nvidia/segformer-b0-finetuned-cityscapes-512-1024')\n"
-                "  \"\n\n"
-                "Then pass the local path via --segformer_model /path/to/cached/model\n"
-                "The cache is usually at: ~/.cache/huggingface/hub/"
-                "models--nvidia--segformer-b0-finetuned-cityscapes-512-1024/snapshots/<hash>/\n"
-            ) from e
+        except OSError:
+            # Network unavailable — retry from local cache only
+            try:
+                model = SegformerForSemanticSegmentation.from_pretrained(
+                    model_id, local_files_only=True)
+            except OSError as e:
+                raise OSError(
+                    f"Cannot load SegFormer from '{model_id}'.\n\n"
+                    "Cache not found. Pre-download on a connected machine:\n\n"
+                    "  python -c \"\n"
+                    "  from huggingface_hub import snapshot_download\n"
+                    "  snapshot_download('nvidia/segformer-b0-finetuned-cityscapes-512-1024')\n"
+                    "  \"\n\n"
+                    "Copy ~/.cache/huggingface/hub/models--nvidia--segformer* "
+                    "to the same path on this machine, or pass a local directory "
+                    "via --segformer_model /path/to/model.\n"
+                ) from e
 
         model.eval()
         for p in model.parameters():
