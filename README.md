@@ -13,11 +13,16 @@ This is the official PyTorch implementation for the CVPR 2023 paper
 ## 🐁 Setup
 We recommend using anaconda to create the env and install the requirements by running:
 ```shell
-conda create -n planedepth python=3.9.7
+conda create -n planedepth python=3.9
 conda activate planedepth
-conda install pytorch==1.10.0 torchvision==0.11.1 torchaudio==0.10.0 cudatoolkit=11.3.1 -c pytorch -c conda-forge
+# CUDA 12.1 wheels — required for sm_90 GPUs (Hopper / H100). The cu121 build
+# ships kernels for sm_70/75/80/86/89/90, so it also runs on older GPUs.
+pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 ```
+> **Older GPUs (pre-Hopper):** the cu121 build above works everywhere from
+> Volta (sm_70) up. If you specifically need CUDA 11.8 instead, use
+> `--index-url https://download.pytorch.org/whl/cu118` (also includes sm_90).
 
 ## 🐂 KITTI training data
 You can download the entire [raw KITTI dataset](http://www.cvlibs.net/datasets/kitti/raw_data.php) by running:
