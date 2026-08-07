@@ -63,7 +63,7 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.set_device(self.local_rank)
         
-        init_seeds(1+self.local_rank)
+        init_seeds(self.opt.seed + self.local_rank)
 
         if dist.get_rank() == 0:
             save_code("./trainer.py", self.log_path)
@@ -1293,9 +1293,9 @@ class Trainer:
 
         # loading adam state
         optimizer_load_path = os.path.join(self.opt.load_weights_folder, "adam.pth")
-        if os.path.isfile(optimizer_load_path):
+        if self.opt.load_optimizer and os.path.isfile(optimizer_load_path):
             print("Loading Adam weights")
             optimizer_dict = torch.load(optimizer_load_path, map_location=self.device)
             self.model_optimizer.load_state_dict(optimizer_dict)
         else:
-            print("Cannot find Adam weights so Adam is randomly initialized")
+            print("Adam state not loaded; using the requested learning rate")

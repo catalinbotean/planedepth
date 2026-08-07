@@ -101,11 +101,42 @@ def evaluate(opt):
                                                     yz_levels=opt.yz_levels, 
                                                     use_mixture_loss=opt.use_mixture_loss, 
                                                     render_probability=opt.render_probability, 
-                                                    plane_residual=opt.plane_residual)
+                                                    plane_residual=opt.plane_residual,
+                                                    pixelwise_plane_residual=opt.pixelwise_plane_residual,
+                                                    use_cross_plane_attn=opt.use_cross_plane_attn,
+                                                    cross_plane_attn_tau=opt.cross_plane_attn_tau,
+                                                    adaptive_plane_range=opt.adaptive_plane_range,
+                                                    adaptive_range_margin=opt.adaptive_range_margin,
+                                                    num_learned_families=opt.num_learned_families,
+                                                    learned_planes_per_family=opt.learned_planes_per_family,
+                                                    use_multiscale_logits=opt.use_multiscale_logits)
 
             model_dict = encoder.state_dict()
             encoder.load_state_dict({k: v for k, v in encoder_dict.items() if k in model_dict})
-            depth_decoder.load_state_dict(torch.load(decoder_path))
+            depth_decoder.load_state_dict(torch.load(decoder_path, map_location="cpu"))
+
+            semantic_backbone = None
+            semantic_gate = None
+            if opt.use_semantic_gate:
+                semantic_backbone = networks.SegFormerBackbone(
+                    model_id=opt.segformer_model)
+                semantic_gate = networks.SemanticPlaneGate(
+                    num_classes=opt.semantic_num_classes,
+                    n_xy=opt.disp_levels,
+                    n_xz=opt.xz_levels,
+                    n_yz=opt.yz_levels,
+                    n_learned=(opt.num_learned_families *
+                               opt.learned_planes_per_family))
+                gate_path = os.path.join(opt.load_weights_folder,
+                                         "semantic_gate.pth")
+                if not os.path.isfile(gate_path):
+                    raise FileNotFoundError(
+                        "Semantic evaluation requested but checkpoint is missing: "
+                        + gate_path)
+                semantic_gate.load_state_dict(
+                    torch.load(gate_path, map_location="cpu"))
+                semantic_backbone.cuda().eval()
+                semantic_gate.cuda().eval()
             
             encoder.cuda()
             encoder.eval()
@@ -152,7 +183,12 @@ def evaluate(opt):
                 grids = grid[None, ...].expand(input_color.shape[0], -1, -1, -1).cuda()
                 
                 if opt.net_type == "ResNet":
-                    output = depth_decoder(encoder(input_color), grids)
+                    features = encoder(input_color)
+                    sem_bias = None
+                    if semantic_backbone is not None:
+                        sem_logits = semantic_backbone(input_color)
+                        sem_bias = semantic_gate(sem_logits)
+                    output = depth_decoder(features, grids, sem_bias=sem_bias)
                 elif opt.net_type == "FalNet":
                     output = model(input_color)
                 elif opt.net_type == "PladeNet":

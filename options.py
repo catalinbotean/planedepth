@@ -323,6 +323,10 @@ class MonodepthOptions:
                                  type=float,
                                  help="learning rate",
                                  default=1e-4)
+        self.parser.add_argument("--seed",
+                                 type=int,
+                                 help="global random seed used for reproducible runs",
+                                 default=1)
         self.parser.add_argument("--beta_1",
                                  type=float,
                                  help="beta1 of Adam",
@@ -340,7 +344,7 @@ class MonodepthOptions:
                                  help="number of epochs",
                                  default=0)
         self.parser.add_argument('--milestones', 
-                                 default=[30, 40], nargs='*',
+                                 default=[30, 40], nargs='*', type=int,
                                  help='epochs at which learning rate is divided by 2')
         self.parser.add_argument("--scheduler_step_size",
                                  type=int,
@@ -370,6 +374,9 @@ class MonodepthOptions:
                                  type=str,
                                  help="models to load",
                                  default=["encoder", "depth"])
+        self.parser.add_argument("--load_optimizer",
+                                 action="store_true",
+                                 help="resume Adam state; leave disabled for HR/SD stage transfer")
         self.parser.add_argument("--stage1_weights_folder",
                                  type=str,
                                  help="path of teacher model to load")
