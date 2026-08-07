@@ -36,11 +36,11 @@ for required in train.py evaluate_depth_HR.py options.py trainer.py; do
   test -f "${required}" || { echo "Missing ${REPO_DIR}/${required}" >&2; exit 1; }
 done
 
-rg -q -- '--seed' options.py || {
+grep -q -- '--seed' options.py || {
   echo "This runner requires the publication branch with --seed support." >&2
   exit 1
 }
-rg -q 'semantic_gate.pth' evaluate_depth_HR.py || {
+grep -q 'semantic_gate.pth' evaluate_depth_HR.py || {
   echo "evaluate_depth_HR.py cannot yet load semantic checkpoints." >&2
   exit 1
 }
