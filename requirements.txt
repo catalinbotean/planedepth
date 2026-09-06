@@ -18,3 +18,4 @@ tensorboardX>=2.6
 # Capped <4.38: newer transformers call torch.utils._pytree.register_pytree_node
 # which only exists in torch>=2.2 (we pin torch 2.1.2 for the cu121 sm_90 build).
 transformers>=4.33,<4.38
+scipy>=1.10  # scipy.io.loadmat, for the Make3D ground-truth .mat range maps

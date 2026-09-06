@@ -410,7 +410,7 @@ class MonodepthOptions:
                                  type=str,
                                  default="eigen_raw",
                                  choices=[
-                                    "eigen_raw", "eigen_improved", "eigen_benchmark", "benchmark", "odom_9", "odom_10", "city"],
+                                    "eigen_raw", "eigen_improved", "eigen_benchmark", "benchmark", "odom_9", "odom_10", "city", "make3d"],
                                  help="which split to run eval on")
         self.parser.add_argument("--save_pred_disps",
                                  help="if set saves predicted disparities",
@@ -425,6 +425,19 @@ class MonodepthOptions:
         self.parser.add_argument("--eval_out_dir",
                                  help="if set will output the disparities to this folder",
                                  type=str)
+        self.parser.add_argument("--make3d_max_depth",
+                                 type=float,
+                                 default=70.,
+                                 help="ground truth depths above this are ignored when "
+                                      "evaluating on Make3D. 70m is the standard C1 "
+                                      "error protocol; pass 80 for C2.")
+        self.parser.add_argument("--make3d_crop_ratio",
+                                 type=float,
+                                 default=2.,
+                                 help="aspect ratio of the centre band kept from the "
+                                      "(nearly square) Make3D images and from the laser "
+                                      "grid: a fraction 1/(1.33333*ratio) of the height "
+                                      "is kept. 2 is the standard protocol.")
         self.parser.add_argument("--post_process",
                                  help="if set will perform the flipping post processing "
                                       "from the original monodepth paper",

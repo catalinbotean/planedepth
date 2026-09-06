@@ -130,6 +130,40 @@ You can also place it wherever you like and point towards it with the --improved
 python splits/eigen_improved/prepare_groundtruth.py --improved_path ./kitti_depth
 ```
 
+**Make3D (cross-dataset generalisation)**
+
+`evaluate_depth_make3d.py` tests a KITTI-trained model on the 134 Make3D test
+images without any fine-tuning. Download and extract the two archives into one
+folder:
+```shell
+mkdir make3d && cd make3d
+wget http://make3d.cs.cornell.edu/data/Test134.tar.gz http://make3d.cs.cornell.edu/data/Gridlaserdata.tar.gz
+tar -xzf Test134.tar.gz && tar -xzf Gridlaserdata.tar.gz && cd ..
+```
+giving `make3d/Test134/img-*.jpg` and `make3d/Gridlaserdata/depth_sph_corr-*.mat`
+(the loader also accepts these two folders nested one level deeper). Then run
+`eval_make3d.sh`, pointing `--data_path` at that folder and using the same
+architecture flags the model was trained with:
+```shell
+CUDA_VISIBLE_DEVICES=0 python evaluate_depth_make3d.py \
+--eval_stereo --eval_split make3d --data_path ./make3d \
+--load_weights_folder ./log/ResNet/exp1_sd/best_models \
+--use_denseaspp --plane_residual --use_mixture_loss \
+--post_process --batch_size 1 --width 1280 --height 384
+```
+Following the standard protocol, image and 55x305 laser grid are both centre
+cropped to the same horizontal band (`--make3d_crop_ratio`, default 2), the
+per-image scale is recovered by median scaling (Make3D shares neither the
+baseline nor the focal length of the KITTI rig), and errors are accumulated
+over ground-truth depths below `--make3d_max_depth` (70m, the C1 protocol).
+The script reports `log10` in addition to the usual metrics.
+
+`python test_make3d.py` smoke-tests the loader and the evaluation loop on a
+synthetic dataset — no download and no weights required.
+
+See [MAKE3D.md](MAKE3D.md) for the full step-by-step instructions, the protocol
+details and the remaining options.
+
 ## 🐉 Pretrained model
 
 | Model      | Abs Rel |  A1  |
