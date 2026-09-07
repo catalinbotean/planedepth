@@ -164,9 +164,14 @@ class MonodepthOptions:
                                       "geometric consistency between XY/XZ/YZ families")
         self.parser.add_argument("--cross_plane_attn_tau",
                                  type=float,
-                                 default=1.0,
+                                 default=0.2,
                                  help="Temperature tau for the cross-plane geometric "
-                                      "compatibility kernel (lower = sharper gates)")
+                                      "compatibility kernel, in LOG-disparity units "
+                                      "(lower = sharper gates). The XY dictionary is "
+                                      "log-uniform with a spacing of "
+                                      "log(disp_min/disp_max)/(disp_levels-1) ~= 0.104, "
+                                      "so tau=0.2 spans about two plane levels at every "
+                                      "depth. Values >~1.0 make the kernel near-uniform.")
         self.parser.add_argument("--adaptive_plane_range",
                                  action="store_true",
                                  help="If set, predict per-image (d_near, d_far) from "
@@ -425,6 +430,16 @@ class MonodepthOptions:
         self.parser.add_argument("--eval_out_dir",
                                  help="if set will output the disparities to this folder",
                                  type=str)
+        self.parser.add_argument("--image_path",
+                                 type=str,
+                                 help="inference only (infer.py): an image, a folder "
+                                      "of images searched recursively, or a split "
+                                      "list, in which case --data_path says where "
+                                      "the drives are")
+        self.parser.add_argument("--output_dir",
+                                 type=str,
+                                 help="inference only (infer.py): where to write the "
+                                      "coloured depth maps (default ./inference)")
         self.parser.add_argument("--make3d_max_depth",
                                  type=float,
                                  default=70.,
