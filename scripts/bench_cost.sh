@@ -1,29 +1,47 @@
 #!/usr/bin/env bash
-# Measure inference cost - parameters, MACs, latency, FPS, peak memory - of the
-# PlaneDepth architecture.
+# Measure inference cost - parameters, MACs, FLOPs, latency, FPS, peak memory.
 #
 # No trained weights are needed: bench_cost.py builds the network from the
 # architecture flags and leaves it randomly initialised, because parameter
 # count, MACs and latency depend on the architecture alone - not on the values
-# in the tensors. So there is nothing to train and no KITTI download involved.
+# in the tensors. Nothing to train, no KITTI download.
 #
-# A log folder is therefore optional. Give one only to reuse the exact flags of
-# a model you did train (read from the opt.json trainer.py writes beside the
-# weights) instead of retyping them:
+# Usage:
+#   bash scripts/bench_cost.sh                     # ours vs PlaneDepth baseline
+#   bash scripts/bench_cost.sh ours 640x192        # ours, one resolution
+#   bash scripts/bench_cost.sh baseline            # plain PlaneDepth only
+#   bash scripts/bench_cost.sh ./log/ResNet/exp1   # flags from that model's opt.json
 #
-#   bash scripts/bench_cost.sh                                  # stage-1 config
-#   bash scripts/bench_cost.sh ./log/ResNet/exp1_1ep            # that model's flags
-#   bash scripts/bench_cost.sh ./log/ResNet/exp1_1ep 640x192    # one resolution
-#   bash scripts/bench_cost.sh "" 1024x320                      # stage-1, one resolution
+# The default "ours" run passes --bench_baseline (so the same script also
+# measures PlaneDepth with every proposed module switched off, on this GPU, in
+# this process) and --bench_no_sem (so the depth branch is timed separately
+# from the frozen SegFormer).
+#
+# Environment:
+#   OURS_FLAGS    override the flag set below, e.g.
+#                 OURS_FLAGS="--yz_levels 16 --use_cross_plane_attn" bash scripts/bench_cost.sh
+#   BENCH_ITERS   timed iterations per configuration (default 100)
+#   BENCH_WARMUP  warm-up iterations (default 20)
 
 set -e
 
-LOG_DIR=${1:-}
+# ---------------------------------------------------------------------------
+# The proposed model. EDIT THIS to match the configuration you are writing up -
+# it is the one place the flag set lives, and --bench_baseline switches every
+# one of these off to produce the comparison row.
+# ---------------------------------------------------------------------------
+OURS_DEFAULT="--use_denseaspp --use_mixture_loss --plane_residual \
+--yz_levels 16 --use_semantic_gate --use_cross_plane_attn"
+
+# PlaneDepth stage 1, i.e. train_ResNet.sh without any of the additions.
+BASELINE_FLAGS="--use_denseaspp --use_mixture_loss --plane_residual"
+
+TARGET=${1:-ours}
 shift || true
 RESOLUTIONS=("$@")
 [ ${#RESOLUTIONS[@]} -eq 0 ] && RESOLUTIONS=(640x192 1280x384)
 
-python - <<'PY' || { echo; echo "Install a MAC counter first:  pip install fvcore" >&2; echo "(thop also works). Latency is still reported without one." >&2; }
+python - <<'PY' || { echo "-> no MAC counter installed: pip install fvcore" >&2; echo "   (latency, FPS and parameters are still reported)" >&2; }
 try:
     import fvcore  # noqa: F401
 except ImportError:
@@ -34,13 +52,27 @@ except ImportError:
 PY
 
 FLAGS=()
-if [ -n "$LOG_DIR" ]; then
-    OPTS="$LOG_DIR/opt.json"
-    [ -f "$OPTS" ] || OPTS="$(dirname "$LOG_DIR")/opt.json"
-    [ -f "$OPTS" ] || { echo "No opt.json in $LOG_DIR or its parent." >&2; exit 1; }
-    echo "-> architecture flags from $OPTS"
-    # store/true flags are emitted only when set; the rest as --key value
-    while IFS= read -r line; do FLAGS+=("$line"); done < <(python - "$OPTS" <<'PY'
+case "$TARGET" in
+    ours)
+        # shellcheck disable=SC2206
+        FLAGS=(${OURS_FLAGS:-$OURS_DEFAULT} --bench_baseline --bench_no_sem)
+        echo "-> proposed model, with the PlaneDepth baseline measured alongside"
+        ;;
+    baseline)
+        # shellcheck disable=SC2206
+        FLAGS=($BASELINE_FLAGS)
+        echo "-> PlaneDepth stage-1 baseline"
+        ;;
+    *)
+        OPTS="$TARGET/opt.json"
+        [ -f "$OPTS" ] || OPTS="$(dirname "$TARGET")/opt.json"
+        [ -f "$OPTS" ] || {
+            echo "'$TARGET' is neither 'ours', 'baseline', nor a folder with opt.json" >&2
+            exit 1
+        }
+        echo "-> architecture flags from $OPTS"
+        # store_true flags are emitted only when set; the rest as --key value
+        while IFS= read -r line; do FLAGS+=("$line"); done < <(python - "$OPTS" <<'PY'
 import json, sys
 
 opt = json.load(open(sys.argv[1]))
@@ -63,12 +95,11 @@ for key in VALUE:
         print(str(opt[key]))
 PY
 )
-else
-    echo "-> no log folder given, benchmarking the stage-1 configuration"
-    echo "-> weights are randomly initialised: cost depends on the architecture only"
-    FLAGS=(--use_denseaspp --use_mixture_loss --plane_residual)
-fi
+        FLAGS+=(--bench_baseline --bench_no_sem)
+        ;;
+esac
 
+echo "-> weights are randomly initialised: cost depends on the architecture only"
 echo "-> flags: ${FLAGS[*]}"
 echo
 
