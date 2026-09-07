@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Measure inference cost - parameters, MACs, latency, FPS, peak memory - for a
-# trained model, using the architecture flags that model was actually trained
-# with.
+# Measure inference cost - parameters, MACs, latency, FPS, peak memory - of the
+# PlaneDepth architecture.
 #
-No trained weights are needed: bench_cost.py builds the network from the
+# No trained weights are needed: bench_cost.py builds the network from the
 # architecture flags and leaves it randomly initialised, because parameter
 # count, MACs and latency depend on the architecture alone - not on the values
 # in the tensors. So there is nothing to train and no KITTI download involved.
