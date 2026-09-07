@@ -22,6 +22,7 @@ that is measured is exactly the model that is trained.  Bench-specific flags:
 from __future__ import absolute_import, division, print_function
 
 import argparse
+import copy
 import time
 
 import torch
@@ -94,27 +95,8 @@ def timeit(fn, inputs, iters, warmup, device):
     return dt * 1e3, 1.0 / dt, peak
 
 
-# --------------------------------------------------------------------------
-def main():
-    base = MonodepthOptions()
-    opt, _ = base.parser.parse_known_args()
-
-    bench = argparse.ArgumentParser(add_help=False)
-    bench.add_argument("--bench_res", nargs="+", default=["640x192", "1280x384"])
-    bench.add_argument("--bench_iters", type=int, default=100)
-    bench.add_argument("--bench_warmup", type=int, default=20)
-    bench.add_argument("--bench_device", type=str, default=None)
-    bench.add_argument("--bench_no_sem", action="store_true")
-    bopt, _ = bench.parse_known_args()
-
-    device = torch.device(bopt.bench_device or
-                          ("cuda" if torch.cuda.is_available() else "cpu"))
-    print("device: {}".format(device))
-    print("dictionary: XY={} XZ={} YZ={}  cpa={} tau={}  gate={}".format(
-        opt.disp_levels, opt.xz_levels, opt.yz_levels,
-        opt.use_cross_plane_attn, opt.cross_plane_attn_tau, opt.use_semantic_gate))
-
-    # ---- build exactly what trainer.create_models() builds -----------------
+def build_models(opt, device):
+    """Build exactly what trainer.create_models() builds, in eval mode."""
     encoder = networks.ResnetEncoder(opt.num_layers, False).to(device).eval()
     depth = networks.DepthDecoder(
         encoder.num_ch_enc,
@@ -144,6 +126,53 @@ def main():
             n_learned=opt.num_learned_families * opt.learned_planes_per_family,
         ).to(device).eval()
 
+    return encoder, depth, seg, gate
+
+
+def strip_proposed(opt):
+    """A copy of opt with every module added on top of PlaneDepth disabled.
+
+    Used by --bench_baseline so the cost of the contribution is measured as a
+    difference against the architecture it is added to, at the same resolution
+    and on the same GPU, rather than against a number quoted from a paper.
+    """
+    base = copy.deepcopy(opt)
+    base.use_semantic_gate = False
+    base.use_cross_plane_attn = False
+    base.use_multiscale_logits = False
+    base.pixelwise_plane_residual = False
+    base.adaptive_plane_range = False
+    base.num_learned_families = 0
+    base.yz_levels = 0
+    return base
+
+
+# --------------------------------------------------------------------------
+def main():
+    base = MonodepthOptions()
+    opt, _ = base.parser.parse_known_args()
+
+    bench = argparse.ArgumentParser(add_help=False)
+    bench.add_argument("--bench_res", nargs="+", default=["640x192", "1280x384"])
+    bench.add_argument("--bench_iters", type=int, default=100)
+    bench.add_argument("--bench_warmup", type=int, default=20)
+    bench.add_argument("--bench_device", type=str, default=None)
+    bench.add_argument("--bench_no_sem", action="store_true")
+    bench.add_argument("--bench_baseline", action="store_true",
+                       help="also measure the plain PlaneDepth architecture "
+                            "(every proposed module disabled), so the added "
+                            "cost is a measured difference")
+    bopt, _ = bench.parse_known_args()
+
+    device = torch.device(bopt.bench_device or
+                          ("cuda" if torch.cuda.is_available() else "cpu"))
+    print("device: {}".format(device))
+    print("dictionary: XY={} XZ={} YZ={}  cpa={} tau={}  gate={}".format(
+        opt.disp_levels, opt.xz_levels, opt.yz_levels,
+        opt.use_cross_plane_attn, opt.cross_plane_attn_tau, opt.use_semantic_gate))
+
+    encoder, depth, seg, gate = build_models(opt, device)
+
     # ---- parameters --------------------------------------------------------
     print("\n--- parameters (M) ---")
     rows, tot, tr = [], 0, 0
@@ -171,6 +200,19 @@ def main():
             for parameter in module.parameters():
                 parameter.requires_grad_(False)
 
+    # ---- optional PlaneDepth baseline, for a measured delta ----------------
+    base_models = None
+    if bopt.bench_baseline:
+        base_models = build_models(strip_proposed(opt), device)
+        for module in base_models:
+            if module is not None:
+                for parameter in module.parameters():
+                    parameter.requires_grad_(False)
+        b_total = sum(sum(p.numel() for p in m.parameters())
+                      for m in base_models if m is not None)
+        print("  {:<24s} {:8.3f}   (PlaneDepth baseline)".format("BASELINE TOTAL",
+                                                                b_total / 1e6))
+
     # ---- per-resolution cost ----------------------------------------------
     for res in bopt.bench_res:
         w, h = (int(v) for v in res.lower().split("x"))
@@ -191,6 +233,14 @@ def main():
                      else "depth branch", full)]
         if bopt.bench_no_sem and seg is not None:
             variants.append(("depth branch only (no SegFormer)", depth_only))
+        if base_models is not None:
+            b_encoder, b_depth, _, _ = base_models
+
+            def baseline(image, coord):
+                return b_depth(b_encoder(image), coord, None)
+
+            variants.append(("PlaneDepth baseline (proposed modules off)",
+                             baseline))
 
         print("\n--- {}x{} ---".format(w, h))
         for label, fn in variants:
@@ -199,7 +249,12 @@ def main():
                                    bopt.bench_warmup, device)
             print("  {}".format(label))
             if g_macs is not None:
-                print("    MACs        : {:8.2f} G   [{}]".format(g_macs, backend))
+                # fvcore and thop both count multiply-accumulates. Papers are
+                # split on whether "GFLOPs" means that number or twice it, so
+                # print both and say which is which.
+                print("    MACs        : {:8.2f} G".format(g_macs))
+                print("    FLOPs       : {:8.2f} G   (2 x MACs)   [{}]"
+                      .format(2 * g_macs, backend))
             else:
                 print("    MACs        : n/a  [{}]".format(backend))
             print("    latency     : {:8.2f} ms  ({:.1f} FPS, batch 1, fp32)".format(ms, fps))
