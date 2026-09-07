@@ -85,7 +85,8 @@ def evaluate(opt):
 
     dataset = datasets.Make3DDataset(opt.data_path, opt.height, opt.width,
                                      filenames=filenames,
-                                     crop_ratio=opt.make3d_crop_ratio)
+                                     crop_ratio=opt.make3d_crop_ratio,
+                                     allow_truncated=opt.make3d_allow_truncated)
     dataloader = DataLoader(dataset, opt.batch_size, shuffle=False,
                             num_workers=opt.num_workers,
                             pin_memory=True, drop_last=False)

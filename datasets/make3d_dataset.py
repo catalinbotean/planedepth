@@ -33,6 +33,7 @@ import os
 import glob
 
 import numpy as np
+import PIL.ImageFile
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
@@ -71,8 +72,17 @@ class Make3DDataset(data.Dataset):
                  crop_ratio=2.,
                  img_dir="Test134",
                  depth_dir="Gridlaserdata",
-                 img_ext=".jpg"):
+                 img_ext=".jpg",
+                 allow_truncated=False):
         super(Make3DDataset, self).__init__()
+
+        # A few JPEGs in the Test134 archive are short by a handful of bytes,
+        # and an interrupted download produces the same symptom. Loading them
+        # is opt-in: the missing rows decode as grey and silently corrupt that
+        # image's metrics, so the default is to stop with an explanatory error.
+        self.allow_truncated = allow_truncated
+        if allow_truncated:
+            PIL.ImageFile.LOAD_TRUNCATED_IMAGES = True
 
         self.data_path = data_path
         self.height = height
@@ -133,7 +143,17 @@ class Make3DDataset(data.Dataset):
 
     def get_color(self, stem):
         """Centre-cropped image resized to the network resolution."""
-        color = self.to_tensor(self.loader(self.get_image_path(stem)))
+        path = self.get_image_path(stem)
+        try:
+            image = self.loader(path)
+        except OSError as exc:
+            raise OSError(
+                "{} could not be decoded ({}). Check the download with "
+                "`python scripts/check_make3d.py <data_path>`: re-extract the "
+                "Test134 archive, or pass --make3d_allow_truncated to decode "
+                "the file anyway (the missing rows become grey, which biases "
+                "that image's metrics).".format(path, exc))
+        color = self.to_tensor(image)
         top, bottom = crop_band(color.shape[1], self.crop_ratio)
         color = color[:, top:bottom, :]
         # Same resampling as datasets.pair_transforms.Resize, so the test-time

@@ -160,6 +160,39 @@ def _(root=None):
     assert capped is not None and np.isfinite(capped).all()
 
 
+# ── 6. corrupted download ─────────────────────────────────────────────────
+@register("6. truncated JPEG errors clearly, --make3d_allow_truncated loads it")
+def _(root=None):
+    import PIL.ImageFile
+
+    broken = os.path.join(root, "broken")
+    os.makedirs(broken)
+    for name in ("Test134", "Gridlaserdata"):
+        shutil.copytree(os.path.join(root, name), os.path.join(broken, name))
+
+    stem = STEMS[0]
+    victim = os.path.join(broken, "Test134", IMG_PREFIX + stem + ".jpg")
+    data = open(victim, "rb").read()
+    with open(victim, "wb") as f:                      # keep the header, drop the tail
+        f.write(data[:int(len(data) * 0.6)])
+
+    # strict first: LOAD_TRUNCATED_IMAGES is a global PIL switch, so the
+    # permissive dataset below cannot be constructed before this assertion
+    dataset = Make3DDataset(broken, NET_H, NET_W)
+    index = dataset.filenames.index(stem)
+    try:
+        dataset[index]
+        raise AssertionError("truncated JPEG did not raise")
+    except OSError as exc:
+        assert "check_make3d" in str(exc), str(exc)
+
+    try:
+        permissive = Make3DDataset(broken, NET_H, NET_W, allow_truncated=True)
+        assert permissive[index][("color", "l")].shape == (3, NET_H, NET_W)
+    finally:
+        PIL.ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+
 def _capture_errors(opt):
     """Run evaluate(opt) and parse the metric row it prints."""
     import io, contextlib

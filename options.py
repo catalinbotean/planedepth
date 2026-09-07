@@ -438,6 +438,14 @@ class MonodepthOptions:
                                       "(nearly square) Make3D images and from the laser "
                                       "grid: a fraction 1/(1.33333*ratio) of the height "
                                       "is kept. 2 is the standard protocol.")
+        self.parser.add_argument("--make3d_allow_truncated",
+                                 action="store_true",
+                                 help="decode truncated Make3D JPEGs instead of "
+                                      "stopping. A few images in the Test134 archive "
+                                      "are short by a few bytes; the missing rows "
+                                      "decode as grey, so that image's metrics are "
+                                      "biased. Check the download first with "
+                                      "scripts/check_make3d.py.")
         self.parser.add_argument("--post_process",
                                  help="if set will perform the flipping post processing "
                                       "from the original monodepth paper",

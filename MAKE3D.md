@@ -140,6 +140,32 @@ PLADE-Net:
 * **log10** is reported in addition to the usual KITTI metrics, since that is
   what the Make3D tables use.
 
+## Verificarea arhivei descarcate
+
+Un JPEG incomplet opreste evaluarea in mijlocul ei, cu
+`OSError: image file is truncated`, si omoara un worker de dataloader. Inainte
+de prima rulare:
+
+```shell
+python scripts/check_make3d.py ./make3d
+```
+
+Verifica faptul ca fiecare imagine se decodeaza complet, ca fiecare imagine are
+un `.mat` pereche si ca fiecare `.mat` contine un `Position3DGrid` citibil.
+Iese cu 0 daca totul e in regula, altfel listeaza fisierele problema.
+
+Daca un fisier ramane trunchiat si dupa un download proaspat, este unul dintre
+JPEG-urile scurte din arhiva originala. Atunci se poate rula cu:
+
+```shell
+--make3d_allow_truncated
+```
+
+Randurile lipsa se decodeaza gri, deci metricile imaginii respective sunt
+usor deplasate — cu 1-2 imagini din 134 efectul asupra mediei e mic, dar real.
+Fara acest flag, loader-ul se opreste cu un mesaj care spune exact ce fisier
+este si ce optiuni ai.
+
 ## Other options
 
 | Flag | Meaning |
@@ -163,4 +189,5 @@ scans the directory.
 | `datasets/make3d_dataset.py` | `Make3DDataset` — Test134 loader, centre crop, `.mat` ground truth |
 | `eval_make3d.sh` | Default run command |
 | `test_make3d.py` | Smoke test on a synthetic dataset |
+| `scripts/check_make3d.py` | Verifica integritatea datasetului descarcat |
 | `eval_make3d_original.sh` | Run command for the released PlaneDepth checkpoints |
