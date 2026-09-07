@@ -16,13 +16,27 @@ def size_of(path):
     return int(w), int(h)
 
 
+def strip_count(path, gutter=8):
+    """How many strips a panel holds: 3 with ground truth, 2 without it.
+
+    The evaluation writes input/prediction/ground truth; inference has no
+    ground truth and writes input/prediction. Only one of the two layouts
+    divides evenly for a given panel height, which is what distinguishes them.
+    """
+    _, h = size_of(path)
+    if (h - 2 * gutter) % 3 == 0:
+        return 3
+    if (h - gutter) % 2 == 0:
+        return 2
+    raise SystemExit("{} is not a 2- or 3-strip panel".format(path))
+
+
 def strips(path, gutter=8):
-    """The three crop expressions of a panel, as (input, prediction, gt)."""
+    """The crop expressions of a panel, in order, starting with the input."""
     w, h = size_of(path)
-    sh = (h - 2 * gutter) // 3
-    return ["{}:{}:0:{}".format(w, sh, 0),
-            "{}:{}:0:{}".format(w, sh, sh + gutter),
-            "{}:{}:0:{}".format(w, sh, 2 * (sh + gutter))]
+    n = strip_count(path, gutter)
+    sh = (h - (n - 1) * gutter) // n
+    return ["{}:{}:0:{}".format(w, sh, i * (sh + gutter)) for i in range(n)]
 
 
 def gray(path, crop, w, h, nearest=False):

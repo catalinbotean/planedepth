@@ -27,7 +27,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from panels import gray, strips
+from panels import gray, strip_count, strips
 
 W, H = 80, 24
 BW, BH = 16, 8
@@ -107,9 +107,31 @@ def main():
     stems = sorted(f[:-len("_panel.png")]
                    for f in os.listdir(os.path.join(root, ours))
                    if f.endswith("_panel.png"))
+    stems = [s for s in stems
+             if all(os.path.isfile(os.path.join(root, m, s + "_panel.png"))
+                    for m in models)]
+    if not stems:
+        raise SystemExit("No scene has a panel in every one of: " + ", ".join(models))
+
+    probe = os.path.join(root, ours, stems[0] + "_panel.png")
+    have_gt = strip_count(probe) == 3
+    if not have_gt and not args.emit:
+        print("These panels carry no ground truth, so the ranking is by how much\n"
+              "{} and {} disagree, not by which is closer to the truth.\n"
+              .format(ours, baseline))
 
     rows = []
     for stem in stems:
+        if not have_gt:
+            maps = {m: load(root, m, stem, 1, [True] * (W * H)) for m in models}
+            if any(v is None for v in maps.values()):
+                continue
+            diff = [abs(a - b) for a, b in zip(maps[ours], maps[baseline])]
+            mean = {m: sum(abs(a - b) for a, b in zip(maps[ours], maps[m])) / (W * H)
+                    for m in models}
+            rows.append((sum(diff) / (W * H), mean, stem,
+                         windows(diff, [0.0] * (W * H), [True] * (W * H))))
+            continue
         gt_raw = load(root, ours, stem, 2, nearest=True)
         mask = [v > 3 for v in gt_raw]              # gaps were painted pure black
         if sum(mask) < 200:
@@ -145,7 +167,11 @@ def main():
         with open(args.emit_file, "w") as fh:
             fh.write("\n".join(specs(args.top)) + "\n")
 
-    print("{} scenes where {} beats every baseline\n".format(len(rows), ours))
+    if have_gt:
+        print("{} scenes where {} beats every baseline\n".format(len(rows), ours))
+    else:
+        print("{} scenes, sorted by how much {} and {} disagree\n"
+              .format(len(rows), ours, baseline))
     header = "{:>6}  " + "  ".join("{:>10}" for _ in models) + "  {:<26} boxes"
     print(header.format("gain", *models, "scene"))
     for gain, mean, stem, boxes in rows[:args.top]:

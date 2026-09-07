@@ -23,7 +23,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from panels import size_of, strips
+from panels import size_of, strip_count, strips
 from textimg import render
 
 GUT, BLOCK_GAP, ROW_GAP = 6, 44, 60
@@ -76,7 +76,7 @@ def main():
     # rows of a block: input, each model, and the ground truth
     rows = [("Input", models[-1], 0)]
     rows += [(labels[i], models[i], 1) for i in range(len(models))]
-    if not args.no_gt:
+    if not args.no_gt and strip_count(ref) == 3:
         rows.append(("Ground truth", models[-1], 2))
 
     badges = {}
