@@ -89,8 +89,24 @@ link-urile din tabelul "Pretrained model" al `README.md`) se evalueaza cu
 antrenate, fara niciuna dintre extensiile adaugate ulterior:
 
 ```shell
-bash eval_make3d_original.sh <weights_folder> [width] [height] [make3d_root]
+bash eval_make3d_original.sh
 ```
+
+Fara argumente cauta singur folderul care contine `depth.pth`, foloseste
+1280x384 si `./make3d`. Argumentele sunt optionale, in ordinea asta:
+
+```shell
+bash eval_make3d_original.sh <weights_folder> [width] [height] [make3d_root] [flag-uri in plus]
+```
+
+Orice pui dupa al patrulea argument se trimite mai departe la
+`evaluate_depth_make3d.py` (de exemplu `--num_workers 4` sau
+`--make3d_max_depth 80`).
+
+Scriptul trimite implicit `--make3d_allow_truncated`, pentru ca o imagine din
+Test134 vine trunchiata cu 31 de octeti din arhiva originala, iar randurile
+lipsa cad in afara benzii centrale pastrate de protocol, deci nu schimba nicio
+metrica. Cu `MAKE3D_STRICT=1` in fata comenzii, flag-ul nu mai este trimis.
 
 | Checkpoint | width | height |
 |------------|-------|--------|
