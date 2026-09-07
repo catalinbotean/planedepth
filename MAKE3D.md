@@ -169,7 +169,7 @@ README-ul lor:
 
 ```shell
 cp scripts/make3d_baseline_eval.py /path/to/monodepth2/
-cd /path/to/monodepth2 && python make3d_baseline_eval.py --arch monodepth2 --weights ./models/mono_640x192 --data_path ~/make3d --allow_truncated
+cd /path/to/monodepth2 && python make3d_baseline_eval.py --arch monodepth2 --weights ./models/mono_640x192 --data_path ~/make3d --allow_truncated --eval_out_dir ~/qual_monodepth2
 ```
 
 Pentru checkpoint-urile lor ResNet-50 adauga `--num_layers 50`. Cifrele
@@ -193,6 +193,11 @@ cd /path/to/Lite-Mono && python make3d_baseline_eval.py --arch litemono --model 
 cp scripts/make3d_baseline_eval.py /path/to/TinyDepth/
 cd /path/to/TinyDepth && python make3d_baseline_eval.py --arch tinydepth --weights ./models/Tiny-Depth --data_path ~/make3d --allow_truncated
 ```
+
+`--eval_out_dir` produce aceleasi fisiere ca la noi (`<stem>_panel.png`,
+`<stem>_pred.png`, `make3d_overview.png`), cu acelasi colormap si aceeasi
+normalizare pe percentile 5/95, deci panourile a doua metode se pot pune direct
+unul langa altul: acelasi nume de fisier inseamna aceeasi scena.
 
 Rezolutia se ia din checkpoint cand acesta o contine (monodepth2 si Lite-Mono
 salveaza `height`/`width` in `encoder.pth`); altfel o dai cu `--height` si

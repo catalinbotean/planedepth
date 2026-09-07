@@ -138,6 +138,78 @@ def load_make3d(data_path, height, width, crop_ratio, allow_truncated):
     return torch.stack(colors), gts, stems
 
 
+# ── figures: same colouring and layout as evaluate_depth_make3d.py ────────
+def colorize(values, cmap="magma", vmin=None, vmax=None):
+    """Map a 2D float array to an HxWx3 uint8 RGB image."""
+    import matplotlib
+
+    try:                       # matplotlib >= 3.5, and the only API in >= 3.9
+        cmap_fn = matplotlib.colormaps[cmap]
+    except AttributeError:
+        import matplotlib.cm
+        cmap_fn = matplotlib.cm.get_cmap(cmap)
+
+    values = np.asarray(values, dtype=np.float32)
+    finite = values[np.isfinite(values) & (values > 0)]
+    if vmin is None:
+        vmin = np.percentile(finite, 5) if finite.size else 0.
+    if vmax is None:
+        vmax = np.percentile(finite, 95) if finite.size else 1.
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    normed = np.clip((values - vmin) / (vmax - vmin), 0., 1.)
+    return (cmap_fn(normed)[..., :3] * 255).astype(np.uint8)
+
+
+def save_visualisations(out_dir, colors, pred_disps, gts, stems, max_depth):
+    """Write one rgb/prediction/ground-truth panel per image, plus a montage.
+
+    File names match evaluate_depth_make3d.py, so a panel from a baseline and
+    the corresponding PlaneDepth panel can be put side by side directly.
+    """
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    panels = []
+    for i, stem in enumerate(stems):
+        color = (np.transpose(colors[i].numpy(), (1, 2, 0)) * 255).astype(np.uint8)
+        h, w = color.shape[:2]
+
+        pred_rgb = colorize(pred_disps[i])
+        pred_rgb = cv2.resize(pred_rgb, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        gt = gts[i].copy()
+        gt[gt > max_depth] = 0.
+        with np.errstate(divide="ignore"):
+            gt_disp = np.where(gt > 0, 1. / np.maximum(gt, 1e-3), 0.)
+        gt_rgb = colorize(gt_disp)
+        gt_rgb[gt <= 0] = 0
+        gt_rgb = cv2.resize(gt_rgb, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        gap = np.full((8, w, 3), 255, dtype=np.uint8)
+        panel = np.concatenate([color, gap, pred_rgb, gap, gt_rgb], axis=0)
+
+        cv2.imwrite(os.path.join(out_dir, stem + "_pred.png"),
+                    cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(os.path.join(out_dir, stem + "_panel.png"),
+                    cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+        panels.append(panel)
+
+    if panels:
+        picks = np.linspace(0, len(panels) - 1, min(12, len(panels))).astype(int)
+        thumbs = [cv2.resize(panels[p], (426, 384)) for p in picks]
+        while len(thumbs) % 4:
+            thumbs.append(np.zeros_like(thumbs[0]))
+        rows = [np.concatenate(thumbs[r:r + 4], axis=1)
+                for r in range(0, len(thumbs), 4)]
+        cv2.imwrite(os.path.join(out_dir, "make3d_overview.png"),
+                    cv2.cvtColor(np.concatenate(rows, axis=0), cv2.COLOR_RGB2BGR))
+
+    print("-> Saved {} panels (rgb / prediction / ground truth) to {}"
+          .format(len(stems), out_dir))
+    print("-> Quick look: {}".format(os.path.join(out_dir, "make3d_overview.png")))
+
+
 # ── per-architecture model construction ───────────────────────────────────
 def build_monodepth2(args, encoder_dict):
     import networks
@@ -217,6 +289,9 @@ def main():
     parser.add_argument("--post_process", action="store_true",
                         help="Monodepthv1 flip post-processing (off by default: "
                              "the published Make3D tables do not use it)")
+    parser.add_argument("--eval_out_dir",
+                        help="if set, write rgb/prediction/ground-truth panels "
+                             "and a 12-scene contact sheet here")
     parser.add_argument("--allow_truncated", action="store_true",
                         help="decode the truncated JPEG in Test134")
     args = parser.parse_args()
@@ -297,6 +372,12 @@ def main():
     print("\n  " + ("{:>8} | " * 8).format(
         "abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "a1", "a2", "a3"))
     print(("&{: 8.5f}  " * 8).format(*mean_errors.tolist()) + "\\\\")
+
+    if args.eval_out_dir:
+        print()
+        save_visualisations(args.eval_out_dir, colors, pred_disps, gts, stems,
+                            args.max_depth)
+
     print("\n-> Done!")
 
 
