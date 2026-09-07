@@ -42,6 +42,13 @@ FRAMES=${FRAMES:-"2011_09_26_drive_0005_sync/0000000139 \
     exit 1
 }
 [ -f "$WEIGHTS/encoder.pth" ] || { echo "$WEIGHTS has no encoder.pth" >&2; exit 1; }
+# infer_baseline.py gained these options after it was first copied around
+grep -q -- "--save_npy" infer_baseline.py || {
+    echo "The infer_baseline.py here predates --cmap/--depth_range/--save_npy." >&2
+    echo "Copy the current one over it:" >&2
+    echo "  cp /path/to/planedepth/scripts/infer_baseline.py ." >&2
+    exit 1
+}
 PY=${PYTHON:-$(command -v python || command -v python3)}
 
 DIR="$OUT/$ARCH"
