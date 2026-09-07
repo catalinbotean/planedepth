@@ -34,6 +34,7 @@ from options import MonodepthOptions
 # helpers
 # --------------------------------------------------------------------------
 def count_params(module):
+    """(total, trainable) parameters."""
     total = sum(p.numel() for p in module.parameters())
     trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
     return total, trainable
@@ -71,7 +72,9 @@ def macs_of(fn, inputs):
             macs, _ = profile(_Wrap(fn), inputs=inputs, verbose=False)
             return macs / 1e9, "thop (MACs)"
     except Exception:  # noqa: BLE001
-        return None, "install fvcore or thop for MAC counts ({})".format(fv_err)
+        reason = str(fv_err).strip().splitlines()
+        reason = reason[0] if reason else fv_err.__class__.__name__
+        return None, "install fvcore or thop for MAC counts ({:.200s})".format(reason)
 
 
 def timeit(fn, inputs, iters, warmup, device):
@@ -158,6 +161,15 @@ def main():
         cpa = sum(p.numel() for n_, p in depth.named_parameters() if "cross_plane_attn" in n_)
         g = sum(p.numel() for p in gate.parameters())
         print("  proposed modules only: gate {} params, CPA {} params".format(g, cpa))
+
+    # Freeze *after* reporting parameters, so the trainable column above stays
+    # truthful. fvcore traces the model and its tracer refuses to treat a
+    # tensor that requires grad as a constant, which is what made MAC counting
+    # fail; nothing here is trained, so dropping grad is free.
+    for module in (encoder, depth, seg, gate):
+        if module is not None:
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
 
     # ---- per-resolution cost ----------------------------------------------
     for res in bopt.bench_res:
