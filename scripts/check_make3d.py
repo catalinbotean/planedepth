@@ -80,9 +80,8 @@ def main(data_path):
         return 0
 
     print()
-    print("-> Re-extract the affected archive, or re-download it:")
-    print("     wget http://make3d.cs.cornell.edu/data/Test134.tar.gz")
-    print("     wget http://make3d.cs.cornell.edu/data/Gridlaserdata.tar.gz")
+    print("-> Re-extract the affected archive, or fetch it again from the "
+          "Make3D data page: http://make3d.cs.cornell.edu/data.html")
     if truncated:
         print("-> If the file is still truncated after a fresh download, it is "
               "one of the short JPEGs in the original archive: pass "

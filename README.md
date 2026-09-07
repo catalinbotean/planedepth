@@ -133,15 +133,13 @@ python splits/eigen_improved/prepare_groundtruth.py --improved_path ./kitti_dept
 **Make3D (cross-dataset generalisation)**
 
 `evaluate_depth_make3d.py` tests a KITTI-trained model on the 134 Make3D test
-images without any fine-tuning. Download and extract the two archives into one
-folder:
-```shell
-mkdir make3d && cd make3d
-wget http://make3d.cs.cornell.edu/data/Test134.tar.gz http://make3d.cs.cornell.edu/data/Gridlaserdata.tar.gz
-tar -xzf Test134.tar.gz && tar -xzf Gridlaserdata.tar.gz && cd ..
-```
-giving `make3d/Test134/img-*.jpg` and `make3d/Gridlaserdata/depth_sph_corr-*.mat`
-(the loader also accepts these two folders nested one level deeper). Then run
+images without any fine-tuning. Download the test-set images and the matching
+laser range grid from the Make3D data page — <http://make3d.cs.cornell.edu/data.html>
+(HTTP only; the direct archive URLs have moved more than once, so take them
+from that page) — and extract both into one folder, giving
+`make3d/Test134/img-*.jpg` and `make3d/Gridlaserdata/depth_sph_corr-*.mat`
+(the loader also accepts these two folders nested one level deeper). Verify the
+download with `python scripts/check_make3d.py ./make3d`, then run
 `eval_make3d.sh`, pointing `--data_path` at that folder and using the same
 architecture flags the model was trained with:
 ```shell

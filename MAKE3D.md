@@ -26,16 +26,13 @@ python test_make3d.py
 
 ## 3. Download the Make3D test set
 
-Roughly 400 MB, the two archives extract into the same folder.
+Roughly 400 MB. Take the test-set images and the matching laser range grid
+from the official data page — <http://make3d.cs.cornell.edu/data.html> — and
+extract both archives into the same folder. The page is HTTP only, and the
+direct archive URLs have changed more than once, so copy them from there rather
+than from a hard-coded link.
 
-```shell
-mkdir -p make3d && cd make3d
-wget http://make3d.cs.cornell.edu/data/Test134.tar.gz http://make3d.cs.cornell.edu/data/Gridlaserdata.tar.gz
-tar -xzf Test134.tar.gz && tar -xzf Gridlaserdata.tar.gz
-cd ..
-```
-
-This gives:
+The result must look like:
 
 ```
 make3d/Test134/img-<stem>.jpg

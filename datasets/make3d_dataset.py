@@ -16,12 +16,9 @@ The ground-truth grid covers the same field of view, so exactly the same
 fractional band is cropped from the 55-row depth map, which keeps predictions
 and ground truth aligned.
 
-Download (both archives extract into the same root)::
-
-    http://make3d.cs.cornell.edu/data/Test134.tar.gz
-    http://make3d.cs.cornell.edu/data/Gridlaserdata.tar.gz
-
-giving::
+The test images and the matching range maps are two archives on the Make3D
+data page, http://make3d.cs.cornell.edu/data.html (HTTP only, and the direct
+archive URLs have moved more than once). Extract both into the same root::
 
     <data_path>/Test134/img-<stem>.jpg
     <data_path>/Gridlaserdata/depth_sph_corr-<stem>.mat
