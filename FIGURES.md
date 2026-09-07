@@ -1,5 +1,34 @@
 # Qualitative figures
 
+## Everything at once
+
+```shell
+bash run_kitti_figure.sh ./log/ResNet/scope_sd/best_models ./log/planedepth_sd/best_models
+```
+
+Evaluates both models on KITTI, writes the panels, ranks the scenes against the
+ground truth, picks the best ones and assembles
+`figures/fig_kitti_qualitative.png`. Steps whose output already exists are
+skipped, so a re-run only redoes what is missing (`FORCE=1` redoes everything).
+
+To leave it running after closing the terminal:
+
+```shell
+nohup bash run_kitti_figure.sh <scope_weights> <planedepth_weights> > kitti_figure.log 2>&1 &
+tail -f kitti_figure.log
+```
+
+Knobs: `SCOPE_FLAGS` (architecture of the proposed model), `EVAL_SPLIT`
+(`eigen_raw` or the denser `eigen_improved`), `WIDTH`/`HEIGHT`, `SCENES` (how
+many scenes go into the figure), `NO_PP=1`. Panels found in `qual_kitti` for
+`monodepth2`, `litemono` or `tinydepth` are picked up as extra rows
+automatically.
+
+The rest of this file documents the same pipeline step by step, for when a
+figure needs hand-picked scenes or captions.
+
+## Step by step
+
 The same three steps produce the KITTI and the Make3D comparison figures:
 evaluate each model with `--eval_out_dir`, rank the scenes against the ground
 truth, then assemble the figure. Every step reads the panel layout from the

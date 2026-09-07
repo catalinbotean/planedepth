@@ -16,9 +16,14 @@ the metrics table.
 Usage:
     python scripts/rank_scenes.py <results_dir> [ours] [baseline] [others...]
     python scripts/rank_scenes.py ./qual_kitti scope_depth planedepth monodepth2
+
+With --emit it prints the best scenes as ready-made scripts/build_fig.py
+arguments instead of a table, so a runner can pipe one into the other.
 """
+import argparse
 import math
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -67,9 +72,36 @@ def windows(err_base, err_ours, mask, limit=2):
     return picked
 
 
+KITTI_STEM = re.compile(r"^(\d{4}_\d{2}_\d{2})_drive_(\d+)_sync_(\d+)$")
+
+
+def caption(stem, index):
+    """A neutral caption; edit it in the figure command when a scene deserves
+    a description rather than an identifier."""
+    letter = "({})".format(chr(ord("a") + index))
+    m = KITTI_STEM.match(stem)
+    if m:
+        return "{} KITTI {}, drive {}, frame {}".format(
+            letter, m.group(1), int(m.group(2)), int(m.group(3)))
+    return "{} {}".format(letter, stem)
+
+
 def main():
-    root = sys.argv[1]
-    models = sys.argv[2:] or ["scope_depth", "planedepth", "monodepth2"]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("results")
+    ap.add_argument("models", nargs="*",
+                    default=["scope_depth", "planedepth", "monodepth2"],
+                    help="proposed model first, then the baselines")
+    ap.add_argument("--top", type=int, default=20, help="rows to report")
+    ap.add_argument("--emit", action="store_true",
+                    help="print build_fig.py --scene arguments instead of a table")
+    ap.add_argument("--emit_file",
+                    help="write those arguments here while the table still goes "
+                         "to stdout, so one pass serves both")
+    args = ap.parse_args()
+
+    root = args.results
+    models = args.models or ["scope_depth", "planedepth", "monodepth2"]
     ours, baseline = models[0], models[1]
 
     stems = sorted(f[:-len("_panel.png")]
@@ -97,10 +129,26 @@ def main():
                      windows(err[baseline], err[ours], mask)))
 
     rows.sort(reverse=True)
+
+    def specs(count):
+        out = []
+        for i, (_, _, stem, boxes) in enumerate(rows[:count]):
+            spec = [stem, caption(stem, i)]
+            spec += ["{},{}".format(x, y) for _, x, y in boxes]
+            out.append("|".join(spec))
+        return out
+
+    if args.emit:
+        print("\n".join(specs(args.top)))
+        return
+    if args.emit_file:
+        with open(args.emit_file, "w") as fh:
+            fh.write("\n".join(specs(args.top)) + "\n")
+
     print("{} scenes where {} beats every baseline\n".format(len(rows), ours))
     header = "{:>6}  " + "  ".join("{:>10}" for _ in models) + "  {:<26} boxes"
     print(header.format("gain", *models, "scene"))
-    for gain, mean, stem, boxes in rows[:20]:
+    for gain, mean, stem, boxes in rows[:args.top]:
         cells = ["{:10.3f}".format(mean[m]) for m in models]
         boxtxt = " ".join("{},{}".format(x, y) for _, x, y in boxes)
         print("{:6.3f}  {}  {:<26} {}".format(gain, "  ".join(cells), stem, boxtxt))
