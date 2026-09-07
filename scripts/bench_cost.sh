@@ -3,15 +3,19 @@
 # trained model, using the architecture flags that model was actually trained
 # with.
 #
-# bench_cost.py accepts every training flag, so the model it builds is only the
-# model you trained if you pass the same flags. Rather than retyping them, this
-# reads them out of the opt.json that trainer.py writes next to the weights.
+No trained weights are needed: bench_cost.py builds the network from the
+# architecture flags and leaves it randomly initialised, because parameter
+# count, MACs and latency depend on the architecture alone - not on the values
+# in the tensors. So there is nothing to train and no KITTI download involved.
 #
-# Usage:
-#   bash scripts/bench_cost.sh ./log/ResNet/exp1_1ep
-#   bash scripts/bench_cost.sh ./log/ResNet/exp1_1ep 640x192 1280x384
+# A log folder is therefore optional. Give one only to reuse the exact flags of
+# a model you did train (read from the opt.json trainer.py writes beside the
+# weights) instead of retyping them:
 #
-# With no log folder it benchmarks the paper's stage-1 configuration.
+#   bash scripts/bench_cost.sh                                  # stage-1 config
+#   bash scripts/bench_cost.sh ./log/ResNet/exp1_1ep            # that model's flags
+#   bash scripts/bench_cost.sh ./log/ResNet/exp1_1ep 640x192    # one resolution
+#   bash scripts/bench_cost.sh "" 1024x320                      # stage-1, one resolution
 
 set -e
 
@@ -62,6 +66,7 @@ PY
 )
 else
     echo "-> no log folder given, benchmarking the stage-1 configuration"
+    echo "-> weights are randomly initialised: cost depends on the architecture only"
     FLAGS=(--use_denseaspp --use_mixture_loss --plane_residual)
 fi
 
