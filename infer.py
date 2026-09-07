@@ -39,6 +39,9 @@ cv2.setNumThreads(0)
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".JPG", ".PNG")
 
 
+STEREO_SCALE_FACTOR = 5.4   # the KITTI baseline, as in the evaluation scripts
+
+
 def colorize(values, cmap="magma", vmin=None, vmax=None):
     """Map a 2D float array to an HxWx3 uint8 RGB image."""
     import matplotlib
@@ -152,8 +155,26 @@ def build_model(opt, device):
     return encoder, depth, backbone, gate
 
 
+def add_options(parser):
+    parser.add_argument("--cmap", default="magma",
+                        help="matplotlib colormap for the depth maps")
+    parser.add_argument("--depth_range", nargs=2, type=float, metavar=("MIN", "MAX"),
+                        help="colour every image on this fixed depth range in "
+                             "metres instead of its own percentiles, so maps "
+                             "from different images and different methods are "
+                             "directly comparable")
+    parser.add_argument("--save_npy", action="store_true",
+                        help="also write <stem>_depth.npy in metres, which is "
+                             "what error maps and a shared colour bar need")
+    parser.add_argument("--scale_factor", type=float, default=STEREO_SCALE_FACTOR,
+                        help="disparity to metric depth factor; 5.4 is the "
+                             "KITTI stereo baseline these models are trained at")
+    return parser
+
+
 def main():
-    opt = MonodepthOptions().parser.parse_known_args()[0]
+    parser = add_options(MonodepthOptions().parser)
+    opt = parser.parse_known_args()[0]
     if not opt.image_path:
         raise SystemExit("--image_path is required (an image, a folder, or a split list)")
     out_dir = opt.output_dir or "./inference"
@@ -196,7 +217,18 @@ def main():
             else:
                 disp = disp[0]
 
-            pred = colorize(disp)
+            # metric depth, the same conversion the evaluation uses
+            depth = opt.scale_factor * 0.1 * 0.58 * opt.width / np.maximum(disp, 1e-6)
+            if opt.save_npy:
+                np.save(os.path.join(out_dir, stem + "_depth.npy"),
+                        cv2.resize(depth, (ow, oh), interpolation=cv2.INTER_NEAREST))
+
+            if opt.depth_range:
+                near, far = opt.depth_range
+                shown = 1.0 / np.clip(depth, near, far)
+                pred = colorize(shown, cmap=opt.cmap, vmin=1.0 / far, vmax=1.0 / near)
+            else:
+                pred = colorize(disp, cmap=opt.cmap)
             pred = cv2.resize(pred, (ow, oh), interpolation=cv2.INTER_CUBIC)
             cv2.imwrite(os.path.join(out_dir, stem + "_pred.png"),
                         cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))

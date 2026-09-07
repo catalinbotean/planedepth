@@ -38,6 +38,13 @@ from PIL import Image
 cv2.setNumThreads(0)
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".JPG", ".PNG")
+STEREO_SCALE_FACTOR = 5.4   # the KITTI baseline, as in the evaluation scripts
+
+
+def disp_to_depth(disp, min_depth=0.1, max_depth=100.):
+    """monodepth2's sigmoid disparity to depth, reimplemented to avoid an import."""
+    min_disp, max_disp = 1. / max_depth, 1. / min_depth
+    return 1. / (min_disp + (max_disp - min_disp) * disp)
 
 
 def colorize(values, cmap="magma", vmin=None, vmax=None):
@@ -177,6 +184,18 @@ def main():
                     help="network input width (default: from the checkpoint)")
     ap.add_argument("--post_process", action="store_true",
                     help="average the horizontally flipped pass as well")
+    ap.add_argument("--cmap", default="magma",
+                    help="matplotlib colormap for the depth maps")
+    ap.add_argument("--depth_range", nargs=2, type=float, metavar=("MIN", "MAX"),
+                    help="colour on this fixed depth range in metres instead of "
+                         "each image's own percentiles, so maps from different "
+                         "methods are directly comparable")
+    ap.add_argument("--save_npy", action="store_true",
+                    help="also write <stem>_depth.npy in metres")
+    ap.add_argument("--scale_factor", type=float, default=STEREO_SCALE_FACTOR,
+                    help="metric scale of the checkpoint; 5.4 for the stereo "
+                         "models, and median scaling for the mono ones, which "
+                         "this script cannot do without ground truth")
     args = ap.parse_args()
 
     encoder_path = os.path.join(args.weights, "encoder.pth")
@@ -221,7 +240,17 @@ def main():
             disp = disp[:, 0].cpu().numpy()
             disp = 0.5 * (disp[0] + disp[1, :, ::-1]) if args.post_process else disp[0]
 
-            pred = colorize(disp)
+            depth = args.scale_factor * disp_to_depth(disp)
+            if args.save_npy:
+                np.save(os.path.join(args.output_dir, stem + "_depth.npy"),
+                        cv2.resize(depth, (ow, oh), interpolation=cv2.INTER_NEAREST))
+
+            if args.depth_range:
+                near, far = args.depth_range
+                shown = 1.0 / np.clip(depth, near, far)
+                pred = colorize(shown, cmap=args.cmap, vmin=1.0 / far, vmax=1.0 / near)
+            else:
+                pred = colorize(disp, cmap=args.cmap)
             pred = cv2.resize(pred, (ow, oh), interpolation=cv2.INTER_CUBIC)
             cv2.imwrite(os.path.join(args.output_dir, stem + "_pred.png"),
                         cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))

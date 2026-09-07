@@ -247,6 +247,21 @@ class MonodepthOptions:
                                       "logits via the learnable SemanticPlaneGate module: "
                                       "sky→XY, road/terrain→XZ, building/wall→YZ. Requires "
                                       "the `transformers` package (pip install transformers).")
+        self.parser.add_argument("--freeze_gate_scale",
+                                 action="store_true",
+                                 help="Ablation flag. Keep the SemanticPlaneGate "
+                                      "instantiated -- so --semantic_edge_smoothness and "
+                                      "--uncertainty_weighted_distillation still have a "
+                                      "segmenter and the fixed class-to-family prior -- but "
+                                      "pin its scalar at 0 so the plane-family logit bias is "
+                                      "an exact no-op. Use for the 'no gate' rows of the "
+                                      "leave-one-out ablation.")
+        self.parser.add_argument("--seed",
+                                 type=int,
+                                 default=1,
+                                 help="Base RNG seed; rank r uses seed + r. The default "
+                                      "reproduces the previous hard-coded behaviour. Vary it "
+                                      "to measure run-to-run variance.")
         self.parser.add_argument("--segformer_model",
                                  type=str,
                                  default="nvidia/segformer-b0-finetuned-cityscapes-512-1024",

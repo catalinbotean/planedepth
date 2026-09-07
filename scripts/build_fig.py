@@ -52,6 +52,10 @@ def main():
     ap.add_argument("--models", default="monodepth2,planedepth,scope_depth")
     ap.add_argument("--labels", default="Monodepth2,PlaneDepth,SCOPE-Depth (ours)")
     ap.add_argument("--no_gt", action="store_true", help="omit the ground-truth row")
+    ap.add_argument("--gt_dir",
+                    help="folder of <stem>_gtcolor.png images to append as a "
+                         "ground-truth row, for panels that carry none "
+                         "(see scripts/fetch_kitti_gt.py and colorize_gt.py)")
     args = ap.parse_args()
 
     models = args.models.split(",")
@@ -78,6 +82,8 @@ def main():
     rows += [(labels[i], models[i], 1) for i in range(len(models))]
     if not args.no_gt and strip_count(ref) == 3:
         rows.append(("Ground truth", models[-1], 2))
+    elif args.gt_dir:
+        rows.append(("Ground truth", args.gt_dir, None))
 
     badges = {}
     for label, _, _ in rows:
@@ -106,11 +112,18 @@ def main():
 
         parts = [cap]
         for i, (label, model, strip) in enumerate(rows):
-            src = os.path.join(args.results, model, stem + "_panel.png")
             out = os.path.join(work, "{}_{}.png".format(safe, i))
+            if strip is None:                     # a ready-made image, not a panel
+                src = os.path.join(model, stem + "_gtcolor.png")
+                if not os.path.isfile(src):
+                    raise SystemExit("no ground truth for {} in {}".format(stem, model))
+                crop = "{}:{}:0:0".format(*size_of(src))
+            else:
+                src = os.path.join(args.results, model, stem + "_panel.png")
+                crop = strips(src)[strip]
             run(["-i", src, "-i", badges[label], "-filter_complex",
                  "[0]crop={},scale={}:{}{}[p];[p][1]overlay=18:16".format(
-                     strips(src)[strip], pw, ph, draw), out])
+                     crop, pw, ph, draw), out])
             parts.append(out)
             if i < len(rows) - 1:
                 parts.append(solid(work, pw, GUT))
