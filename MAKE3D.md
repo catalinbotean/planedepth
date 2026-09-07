@@ -84,6 +84,40 @@ Output is a single metric row:
    abs_rel |   sq_rel |     rmse | rmse_log |    log10 |       a1 |       a2 |       a3 |
 ```
 
+## Rularea checkpoint-urilor originale PlaneDepth
+
+Modelele publicate cu articolul (`stage1`, `HRfinetune`, `self-distillation` —
+link-urile din tabelul "Pretrained model" al `README.md`) se evalueaza cu
+`eval_make3d_original.sh`, care trimite doar flag-urile cu care au fost
+antrenate, fara niciuna dintre extensiile adaugate ulterior:
+
+```shell
+bash eval_make3d_original.sh <weights_folder> [width] [height] [make3d_root]
+```
+
+| Checkpoint | width | height |
+|------------|-------|--------|
+| `stage1` | 640 | 192 |
+| `HRfinetune` | 1280 | 384 |
+| `self-distillation` | 1280 | 384 |
+
+Exemplu:
+
+```shell
+bash eval_make3d_original.sh ./log/planedepth_sd/best_models 1280 384 ./make3d
+```
+
+Arhiva descarcata trebuie sa contina `encoder.pth` si `depth.pth` direct in
+folderul dat ca `<weights_folder>`.
+
+Modulele adaugate dupa publicare (`--use_semantic_gate`,
+`--use_cross_plane_attn`, `--num_learned_families`, `--use_multiscale_logits`,
+`--adaptive_plane_range`, `--pixelwise_plane_residual`) isi creeaza parametrii
+doar cand flag-ul lor este activ, deci cu flag-urile de mai sus `state_dict`-ul
+original se incarca strict, fara chei lipsa. Daca apare
+`Missing key(s) in state_dict`, inseamna ca a ramas activat un flag in plus
+fata de cele cu care a fost antrenat checkpoint-ul.
+
 ## Protocol
 
 Implemented in `evaluate_depth_make3d.py` and `datasets/make3d_dataset.py`,
@@ -129,3 +163,4 @@ scans the directory.
 | `datasets/make3d_dataset.py` | `Make3DDataset` — Test134 loader, centre crop, `.mat` ground truth |
 | `eval_make3d.sh` | Default run command |
 | `test_make3d.py` | Smoke test on a synthetic dataset |
+| `eval_make3d_original.sh` | Run command for the released PlaneDepth checkpoints |
