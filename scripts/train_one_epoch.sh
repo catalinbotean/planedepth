@@ -35,7 +35,9 @@ SPLIT=splits/eigen_full_left/train_files.txt
 EXT=""
 FIRST=$(head -1 "$SPLIT")
 FOLDER=$(echo "$FIRST" | awk '{print $1}')
-FRAME=$(printf '%010d' "$(echo "$FIRST" | awk '{print $2}')")
+# 10# forces base 10: some splits pad the frame index with zeros, which bash
+# would otherwise read as octal
+FRAME=$(printf '%010d' "$((10#$(echo "$FIRST" | awk '{print $2}')))")
 for candidate in png jpg; do
     if [ -f "$DATA/$FOLDER/image_02/data/$FRAME.$candidate" ]; then
         EXT=$candidate
@@ -61,7 +63,7 @@ MISSING=0
 CHECKED=0
 while read -r folder frame side; do
     [ -n "$folder" ] || continue
-    f=$(printf '%010d' "$frame")
+    f=$(printf '%010d' "$((10#$frame))")
     [ -f "$DATA/$folder/image_02/data/$f.$EXT" ] || MISSING=$((MISSING + 1))
     CHECKED=$((CHECKED + 1))
     [ $CHECKED -ge 200 ] && break
