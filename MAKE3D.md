@@ -131,6 +131,29 @@ original se incarca strict, fara chei lipsa. Daca apare
 `Missing key(s) in state_dict`, inseamna ca a ramas activat un flag in plus
 fata de cele cu care a fost antrenat checkpoint-ul.
 
+## Imagini rezultate
+
+Cu `--eval_out_dir` scriptul salveaza, dupa metrici, cate un panou pentru
+fiecare imagine plus un contact sheet:
+
+```shell
+bash eval_make3d_original.sh ./log/planedepth_sd/best_models 1280 384 ./make3d --eval_out_dir ./qual_make3d
+```
+
+In folder apar:
+
+| Fisier | Continut |
+|--------|----------|
+| `<stem>_panel.png` | imaginea de intrare, predictia si ground truth-ul, unul sub altul |
+| `<stem>_pred.png` | doar predictia, colorata cu magma (aproape = deschis) |
+| `make3d_overview.png` | 12 scene alese uniform, intr-o grila 4x3, pentru o privire rapida |
+
+Ground truth-ul este grila laser de 20x305 randuri pastrate, afisata cu
+nearest-neighbour ca sa se vada rezolutia ei reala; pixelii fara masuratoare
+si cei peste `--make3d_max_depth` raman negri. Predictia este disparitate, deci
+scara de culoare nu este metrica — pentru adancimi in metri foloseste
+`--save_pred_disps` si aplici tu scalarea.
+
 ## Protocol
 
 Implemented in `evaluate_depth_make3d.py` and `datasets/make3d_dataset.py`,

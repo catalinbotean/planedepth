@@ -21,7 +21,7 @@ from PIL import Image
 from scipy.io import savemat
 
 from datasets.make3d_dataset import Make3DDataset, crop_band, IMG_PREFIX, DEPTH_PREFIX
-from evaluate_depth_make3d import compute_errors, evaluate
+from evaluate_depth_make3d import compute_errors, evaluate, save_visualisations
 from options import MonodepthOptions
 
 TESTS   = []   # list of (name, fn) in definition order
@@ -191,6 +191,32 @@ def _(root=None):
         assert permissive[index][("color", "l")].shape == (3, NET_H, NET_W)
     finally:
         PIL.ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+
+# ── 7. visualisations ─────────────────────────────────────────────────────
+@register("7. --eval_out_dir writes panels and a montage")
+def _(root=None):
+    dataset = Make3DDataset(root, NET_H, NET_W)
+    gt = np.concatenate([dataset[i][("depth_gt", "l")].numpy() for i in range(len(dataset))])
+    disps = np.stack([np.full((NET_H, NET_W), 0.5, np.float32)
+                      + np.linspace(0, 1, NET_W, dtype=np.float32)[None, :]
+                      for _ in range(len(dataset))])
+
+    out_dir = os.path.join(root, "vis")
+    save_visualisations(out_dir, dataset, disps, gt, 70.)
+
+    for stem in dataset.filenames:
+        for suffix in ("_pred.png", "_panel.png"):
+            path = os.path.join(out_dir, stem + suffix)
+            assert os.path.isfile(path), path
+            assert os.path.getsize(path) > 0, path
+    montage = os.path.join(out_dir, "make3d_overview.png")
+    assert os.path.isfile(montage), montage
+
+    import cv2 as _cv2
+    panel = _cv2.imread(os.path.join(out_dir, dataset.filenames[0] + "_panel.png"))
+    # rgb + prediction + ground truth stacked, with two 8px separators
+    assert panel.shape == (NET_H * 3 + 16, NET_W, 3), panel.shape
 
 
 def _capture_errors(opt):

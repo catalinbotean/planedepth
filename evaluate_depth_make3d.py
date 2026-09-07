@@ -61,6 +61,87 @@ def batch_post_process_disparity(l_disp, r_disp):
     return m_disp#r_mask * l_disp + l_mask * r_disp + (1.0 - l_mask - r_mask) * m_disp
 
 
+def colorize(values, cmap="magma", vmin=None, vmax=None):
+    """Map a 2D float array to an HxWx3 uint8 RGB image."""
+    import matplotlib
+
+    try:                       # matplotlib >= 3.5, and the only API in >= 3.9
+        cmap_fn = matplotlib.colormaps[cmap]
+    except AttributeError:
+        import matplotlib.cm
+        cmap_fn = matplotlib.cm.get_cmap(cmap)
+
+    values = np.asarray(values, dtype=np.float32)
+    finite = values[np.isfinite(values) & (values > 0)]
+    if vmin is None:
+        vmin = np.percentile(finite, 5) if finite.size else 0.
+    if vmax is None:
+        vmax = np.percentile(finite, 95) if finite.size else 1.
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    normed = np.clip((values - vmin) / (vmax - vmin), 0., 1.)
+    rgb = cmap_fn(normed)[..., :3]
+    return (rgb * 255).astype(np.uint8)
+
+
+def save_visualisations(out_dir, dataset, pred_disps, gt_depths, max_depth):
+    """Write per-image RGB / prediction / ground-truth panels plus a montage.
+
+    Runs after the metrics, re-reading the colour images from the dataset, so
+    it costs one extra pass over 134 JPEGs and no memory during inference.
+    """
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    panels = []
+    for i in range(pred_disps.shape[0]):
+        stem = dataset.filenames[i]
+
+        color = dataset[i][("color", "l")].numpy()             # 3, H, W in [0, 1]
+        color = (np.transpose(color, (1, 2, 0)) * 255).astype(np.uint8)
+        h, w = color.shape[:2]
+
+        # the network predicts disparity: near is bright, which is the usual
+        # way depth papers show these maps
+        pred_rgb = colorize(pred_disps[i])
+        pred_rgb = cv2.resize(pred_rgb, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        # ground truth is a coarse 20x305 laser grid: nearest-neighbour keeps
+        # its real resolution visible instead of pretending it is dense
+        gt = gt_depths[i].copy()
+        gt[gt > max_depth] = 0.
+        with np.errstate(divide="ignore"):
+            gt_disp = np.where(gt > 0, 1. / np.maximum(gt, 1e-3), 0.)
+        gt_rgb = colorize(gt_disp)
+        gt_rgb[gt <= 0] = 0                                     # holes stay black
+        gt_rgb = cv2.resize(gt_rgb, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        gap = np.full((8, w, 3), 255, dtype=np.uint8)
+        panel = np.concatenate([color, gap, pred_rgb, gap, gt_rgb], axis=0)
+
+        cv2.imwrite(os.path.join(out_dir, stem + "_pred.png"),
+                    cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(os.path.join(out_dir, stem + "_panel.png"),
+                    cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+        panels.append(panel)
+
+    # a single contact sheet of 12 evenly spaced scenes, for a quick look
+    if panels:
+        picks = np.linspace(0, len(panels) - 1, min(12, len(panels))).astype(int)
+        thumbs = [cv2.resize(panels[p], (426, 384)) for p in picks]
+        while len(thumbs) % 4:
+            thumbs.append(np.zeros_like(thumbs[0]))
+        rows = [np.concatenate(thumbs[r:r + 4], axis=1)
+                for r in range(0, len(thumbs), 4)]
+        montage = np.concatenate(rows, axis=0)
+        cv2.imwrite(os.path.join(out_dir, "make3d_overview.png"),
+                    cv2.cvtColor(montage, cv2.COLOR_RGB2BGR))
+
+    print("-> Saved {} panels (rgb / prediction / ground truth) to {}"
+          .format(pred_disps.shape[0], out_dir))
+    print("-> Quick look: {}".format(os.path.join(out_dir, "make3d_overview.png")))
+
+
 def evaluate(opt):
     """Evaluates a KITTI-trained model on the Make3D Test134 set.
 
@@ -303,6 +384,12 @@ def evaluate(opt):
     print("\n  " + ("{:>8} | " * 8).format(
         "abs_rel", "sq_rel", "rmse", "rmse_log", "log10", "a1", "a2", "a3"))
     print(("&{: 8.5f}  " * 8).format(*mean_errors.tolist()) + "\\\\")
+
+    if opt.eval_out_dir:
+        print()
+        save_visualisations(opt.eval_out_dir, dataset, pred_disps, gt_depths,
+                            MAX_DEPTH)
+
     print("\n-> Done!")
 
 
