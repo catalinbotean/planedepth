@@ -154,6 +154,52 @@ si cei peste `--make3d_max_depth` raman negri. Predictia este disparitate, deci
 scara de culoare nu este metrica — pentru adancimi in metri foloseste
 `--save_pred_disps` si aplici tu scalarea.
 
+## Baseline-uri rulate cu acelasi protocol
+
+`scripts/make3d_baseline_eval.py` ruleaza aceeasi evaluare Make3D pentru
+modelele din descendenta monodepth2, ca sa ai cifre obtinute de tine, nu
+imprumutate din alt articol. Scriptul se copiaza in repo-ul baseline-ului
+(are nevoie de pachetul `networks` al acelui repo) si nu importa nimic din
+PlaneDepth — crop-ul, median scaling-ul si metricile sunt duplicate intentionat
+acolo, deci daca schimbi protocolul in `evaluate_depth_make3d.py` trebuie
+schimbat si aici.
+
+**Monodepth2** — <https://github.com/nianticlabs/monodepth2>, greutati in
+README-ul lor:
+
+```shell
+cp scripts/make3d_baseline_eval.py /path/to/monodepth2/
+cd /path/to/monodepth2 && python make3d_baseline_eval.py --arch monodepth2 --weights ./models/mono_640x192 --data_path ~/make3d --allow_truncated
+```
+
+Pentru checkpoint-urile lor ResNet-50 adauga `--num_layers 50`. Cifrele
+publicate de ei sunt 0.322 / 3.589 / 7.417 / log10 0.163 (mono) — daca le
+reproducem, protocolul nostru este identic cu cel din literatura, si abia atunci
+rezultatul PlaneDepth poate intra intr-un tabel comparativ fara rezerve.
+
+**Lite-Mono** — <https://github.com/noahzn/Lite-Mono>:
+
+```shell
+cp scripts/make3d_baseline_eval.py /path/to/Lite-Mono/
+cd /path/to/Lite-Mono && python make3d_baseline_eval.py --arch litemono --model lite-mono --weights ./weights/lite-mono_640x192 --data_path ~/make3d --allow_truncated
+```
+
+`--model` accepta `lite-mono`, `lite-mono-small`, `lite-mono-tiny`,
+`lite-mono-8m` si trebuie sa corespunda checkpoint-ului.
+
+**TinyDepth** — <https://github.com/ZYCheng777/TinyDepth>:
+
+```shell
+cp scripts/make3d_baseline_eval.py /path/to/TinyDepth/
+cd /path/to/TinyDepth && python make3d_baseline_eval.py --arch tinydepth --weights ./models/Tiny-Depth --data_path ~/make3d --allow_truncated
+```
+
+Rezolutia se ia din checkpoint cand acesta o contine (monodepth2 si Lite-Mono
+salveaza `height`/`width` in `encoder.pth`); altfel o dai cu `--height` si
+`--width`. Post-procesarea prin flip este **oprita implicit**, pentru ca
+tabelele Make3D publicate nu o folosesc — o activezi cu `--post_process` daca
+vrei sa compari cu rularea noastra care o are pornita.
+
 ## Protocol
 
 Implemented in `evaluate_depth_make3d.py` and `datasets/make3d_dataset.py`,
@@ -226,4 +272,5 @@ scans the directory.
 | `eval_make3d.sh` | Default run command |
 | `test_make3d.py` | Smoke test on a synthetic dataset |
 | `scripts/check_make3d.py` | Verifica integritatea datasetului descarcat |
+| `scripts/make3d_baseline_eval.py` | Acelasi protocol pentru monodepth2 / Lite-Mono / TinyDepth |
 | `eval_make3d_original.sh` | Run command for the released PlaneDepth checkpoints |
