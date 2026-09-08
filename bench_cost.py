@@ -84,6 +84,11 @@ def timeit(fn, inputs, iters, warmup, device):
             fn(*inputs)
         if device.type == "cuda":
             torch.cuda.synchronize()
+            # Release whatever the MAC tracer left in the pool, then start the
+            # peak counters from the steady state: weights resident, no
+            # activations. Both peaks below therefore include the parameters,
+            # which is what a deployment has to provision for.
+            torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         for _ in range(iters):
@@ -91,8 +96,12 @@ def timeit(fn, inputs, iters, warmup, device):
         if device.type == "cuda":
             torch.cuda.synchronize()
         dt = (time.perf_counter() - t0) / iters
-    peak = torch.cuda.max_memory_allocated() / 2 ** 20 if device.type == "cuda" else float("nan")
-    return dt * 1e3, 1.0 / dt, peak
+    if device.type == "cuda":
+        peak = torch.cuda.max_memory_allocated() / 2 ** 20
+        reserved = torch.cuda.max_memory_reserved() / 2 ** 20
+    else:
+        peak = reserved = float("nan")
+    return dt * 1e3, 1.0 / dt, peak, reserved
 
 
 def build_models(opt, device):
@@ -245,8 +254,8 @@ def main():
         print("\n--- {}x{} ---".format(w, h))
         for label, fn in variants:
             g_macs, backend = macs_of(fn, (img, grid))
-            ms, fps, peak = timeit(fn, (img, grid), bopt.bench_iters,
-                                   bopt.bench_warmup, device)
+            ms, fps, peak, reserved = timeit(fn, (img, grid), bopt.bench_iters,
+                                             bopt.bench_warmup, device)
             print("  {}".format(label))
             if g_macs is not None:
                 # fvcore and thop both count multiply-accumulates. Papers are
@@ -259,7 +268,8 @@ def main():
                 print("    MACs        : n/a  [{}]".format(backend))
             print("    latency     : {:8.2f} ms  ({:.1f} FPS, batch 1, fp32)".format(ms, fps))
             if device.type == "cuda":
-                print("    peak memory : {:8.1f} MiB".format(peak))
+                print("    peak memory : {:8.1f} MiB  (allocated: weights + activations)".format(peak))
+                print("    peak reserved: {:7.1f} MiB  (allocator pool)".format(reserved))
 
 
 if __name__ == "__main__":
